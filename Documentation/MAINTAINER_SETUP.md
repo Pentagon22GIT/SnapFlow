@@ -1,6 +1,6 @@
 # Maintainer Setup Guide
 
-この文書は、SnapFlowを新しい公開GitHubリポジトリとして開始し、Community版と公式自己署名版を安全に管理するためのMaintainer向け手順です。コマンドはSnapFlowプロジェクトのルートで実行します。
+この文書は、SnapFlowを新しいGitHubリポジトリとして開始し、非公開状態での初期監査を経て、Community版と公式自己署名版を安全に公開・管理するためのMaintainer向け手順です。コマンドはSnapFlowプロジェクトのルートで実行します。
 
 ## 1. 前提
 
@@ -20,11 +20,200 @@ VS Codeを通常のコードエディタとして使用できます。ただし�
 xcode-select -p
 ```
 
-## 2. Rules設定の記述を更新
+## 2. 公開前のファイルを確認する
 
-`### Rules / Branch protection`から`### Actions`の直前までを、次へ置き換えます。
+新しい作業フォルダに古いGit履歴がないことを確認します。
 
-````markdown
+```zsh
+if test -e .git; then
+  echo "注意: .gitが存在します"
+else
+  echo "OK: 古いGit履歴はありません"
+fi
+```
+
+次の生成物や秘密情報を公開準備ツリーへ含めません。
+
+- `.build`、`build`、`release`
+- `.p12`、`.pfx`
+- 秘密鍵を含む`.pem`、`.key`
+- GitHub Personal Access Token
+- Apple ID、パスワード、復旧コード
+- 非公開にしたいメールアドレス
+- 実在ユーザーの画面キャプチャやウィンドウタイトル
+- 個人情報を含むログ
+
+候補ファイルを確認します。
+
+```zsh
+find . -maxdepth 2 -type d \
+  \( -name .git -o -name .build -o -name build -o -name release \) \
+  -print
+
+find . -type f \
+  \( -iname '*.p12' -o -iname '*.pfx' -o -iname '*.pem' -o -iname '*.key' \) \
+  -print
+```
+
+非公開にしたいメールアドレスは、値をコマンド履歴へ直接書かずに確認します。
+
+```zsh
+read -r "private_email?非公開にしたいメールアドレスを入力してEnter: "
+grep -RInF --exclude-dir=.git --exclude-dir=.build -- "$private_email" . \
+  || echo "OK: 個人メールアドレスは見つかりません"
+unset private_email
+```
+
+`.gitignore`は一般的な生成物と秘密鍵拡張子を除外しますが、拡張子を変えた秘密情報までは保証できません。初回コミット前とすべてのPush前に、ステージした差分を確認します。
+
+## 3. Gitの本人性を設定する
+
+アプリのコード署名鍵、GitHubへのSSH接続に使う認証鍵、Gitのコミット署名鍵はそれぞれ別の目的です。GitHub用のコミット署名には専用のSSH署名鍵を使用します。
+
+### メールアドレスの公開を防ぐ
+
+GitHubの`Settings > Emails`で次を設定します。
+
+- `Keep my email addresses private`を有効にする
+- `Block command line pushes that expose my email`を有効にする
+- 表示されたGitHub提供のnoreplyアドレスを控える
+
+以降の`<GitHubのnoreplyアドレス>`は、GitHubの画面に表示された値へ置き換えます。個人メールアドレスを入力しません。
+
+### SSH署名鍵を作る
+
+既存のSSH認証鍵と分離する場合は次を使います。既に安全に作成・登録済みなら再生成しません。
+
+```zsh
+ssh-keygen -t ed25519 -C "SnapFlow Git signing" -f ~/.ssh/snapflow_git_signing
+```
+
+秘密鍵`~/.ssh/snapflow_git_signing`を公開しないでください。公開鍵`~/.ssh/snapflow_git_signing.pub`をGitHubの`Settings > SSH and GPG keys > New SSH key`へSigning Keyとして登録します。
+
+Gitへ設定します。
+
+```zsh
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/snapflow_git_signing.pub
+git config --global commit.gpgsign true
+git config --global tag.gpgSign true
+```
+
+ローカルでもSSH署名タグを検証できるよう、`~/.ssh/allowed_signers`へGitHubのnoreplyアドレスと公開鍵を1行で登録します。
+
+```text
+GitHubのnoreplyアドレス namespaces="git" ssh-ed25519 公開鍵本体
+```
+
+そのファイルをGitへ設定します。
+
+```zsh
+git config --global gpg.ssh.allowedSignersFile ~/.ssh/allowed_signers
+```
+
+`allowed_signers`には`.pub`ファイルの`ssh-ed25519`以降を記載し、秘密鍵は記載しません。
+
+GitHubは検証できたSSH、GPG、S/MIME署名を`Verified`として表示します。ただし、Gitの署名鍵はアプリのTCC本人性を保証するコード署名鍵とは別です。Gitの名前とメールアドレスは、リポジトリ初期化後にリポジトリ単位でも固定します。
+
+## 4. GitHubに空のリポジトリを作る
+
+GitHubで`New repository`を選び、次のように設定します。
+
+| 項目             | 値         |
+| ---------------- | ---------- |
+| Repository name  | `SnapFlow` |
+| Visibility       | Private    |
+| Add a README     | OFF        |
+| Add .gitignore   | None       |
+| Choose a license | None       |
+
+README、`.gitignore`、LICENSEは既にプロジェクトへ含まれているため、GitHub側で自動生成しません。最初はPrivateのまま初回コミット、Actions、コミットメタデータを確認し、公開前監査が完了してからPublicへ変更します。
+
+## 5. ローカルでGitを開始する
+
+まだ`.git`がないことを確認して初期化します。
+
+```zsh
+git init -b main
+git config user.name "Pentagon22GIT"
+git config user.email "<GitHubのnoreplyアドレス>"
+git config gpg.format ssh
+git config user.signingkey ~/.ssh/snapflow_git_signing.pub
+git config commit.gpgsign true
+git config tag.gpgSign true
+git config gpg.ssh.allowedSignersFile ~/.ssh/allowed_signers
+```
+
+コミット作成前に、Gitが使用する本人情報を確認します。AuthorとCommitterの両方がnoreplyアドレスになっていなければ先へ進みません。
+
+```zsh
+git config --show-origin --get user.name
+git config --show-origin --get user.email
+git var GIT_AUTHOR_IDENT
+git var GIT_COMMITTER_IDENT
+```
+
+構文検証、テスト、Communityビルドを実行します。
+
+```zsh
+zsh -n Scripts/*.sh
+swift test
+./Scripts/build-community.sh
+```
+
+生成物が`.gitignore`の対象であることを確認してから、ソースをステージします。
+
+```zsh
+git add .
+git status --short
+git diff --cached --check
+git diff --cached --stat
+git diff --cached
+git ls-files | grep -Ei '\.(p12|pfx|pem|key)$' \
+  || echo "OK: 秘密鍵候補は追跡されていません"
+git commit -S -m "Initial secure SnapFlow v1.0.0 project"
+```
+
+`git diff --cached`が長くても、秘密鍵、トークン、個人情報がないことを確認します。コミット後、署名とメタデータを確認します。
+
+```zsh
+git log --show-signature -1
+git show -s --format=fuller HEAD
+git log --all --format='%H | author=%an <%ae> | committer=%cn <%ce>'
+```
+
+GitHubで表示されたURLを使ってRemoteを登録します。
+
+```zsh
+git remote add origin git@github.com:Pentagon22GIT/SnapFlow.git
+git remote -v
+git push -u origin main
+```
+
+Pushはコミット済みの履歴をGitHubへ送ります。未コミットのファイルは送られません。
+
+## 6. GitHubの安全設定
+
+### Private状態での初期監査
+
+最初のPush後、リポジトリをPublicへ変更する前に次を確認します。
+
+- GitHub上の初回コミットが`Verified`である
+- AuthorとCommitterがGitHubのnoreplyアドレスである
+- 個人メールアドレス、秘密鍵、トークン、ビルド生成物が公開対象にない
+- `build-and-test`が成功している
+- CodeQL Workflowの内容と権限が意図どおりである（Privateリポジトリで利用できない場合はPublicへの変更後に実行確認する）
+- README、LICENSE、SECURITY、公開文書が意図した内容である
+
+監査が完了した場合だけ、`Settings > General > Danger Zone > Change repository visibility`からPublicへ変更します。Publicへ変更した直後に、以下のRules、Actions、Security設定を完成させます。
+
+### General
+
+- Default branchを`main`にします。
+- `Automatically delete head branches`を有効にします。
+- Merge方式は最初は`Squash merging`だけでも構いません。
+- WikiやProjectsを使わない場合は無効化し、管理対象を減らします。
+
 ### Rules / Branch protection
 
 `main`を対象に次を設定します。
@@ -53,116 +242,6 @@ CodeQLは実行時間と一人開発での停止リスクを考慮し、`main`�
 - Bypass権限は追加しない
 
 Tag Rulesetは公開済みタグの付け替えと削除を防ぎます。タグオブジェクト自体の署名は別途`git tag -s`で行い、GitHub上の`Verified`表示も確認します。
-
-## 3. Gitの本人性を設定する
-
-アプリのコード署名鍵とGitのコミット署名鍵は分離します。GitHub用には専用のSSH署名鍵を推奨します。
-
-### SSH署名鍵を作る
-
-既存のSSH認証鍵と分離する場合は次を使います。
-
-```zsh
-ssh-keygen -t ed25519 -C "SnapFlow Git signing" -f ~/.ssh/snapflow_git_signing
-```
-````
-
-秘密鍵`~/.ssh/snapflow_git_signing`を公開しないでください。公開鍵`~/.ssh/snapflow_git_signing.pub`をGitHubの`Settings > SSH and GPG keys > New SSH key`へSigning Keyとして登録します。
-
-Gitへ設定します。
-
-```zsh
-git config --global gpg.format ssh
-git config --global user.signingkey ~/.ssh/snapflow_git_signing.pub
-git config --global commit.gpgsign true
-git config --global tag.gpgSign true
-```
-
-ローカルでもSSH署名タグを検証できるよう、`~/.ssh/allowed_signers`へGitHubで検証済みのメールアドレスと公開鍵を1行で登録します。
-
-```text
-GitHubで検証済みのメールアドレス namespaces="git" ssh-ed25519 公開鍵本体
-```
-
-そのファイルをGitへ設定します。
-
-```zsh
-git config --global gpg.ssh.allowedSignersFile ~/.ssh/allowed_signers
-```
-
-`allowed_signers`には`.pub`ファイルの`ssh-ed25519`以降を記載し、秘密鍵は記載しません。
-
-GitHubへ登録したメールアドレスも確認します。
-
-```zsh
-git config --global user.name
-git config --global user.email
-```
-
-GitHubは検証できたSSH、GPG、S/MIME署名を`Verified`として表示します。ただし、Gitの署名鍵はアプリのTCC本人性を保証するコード署名鍵とは別です。
-
-## 4. GitHubに空のリポジトリを作る
-
-GitHubで`New repository`を選び、次のように設定します。
-
-| 項目             | 値         |
-| ---------------- | ---------- |
-| Repository name  | `SnapFlow` |
-| Visibility       | Public     |
-| Add a README     | OFF        |
-| Add .gitignore   | None       |
-| Choose a license | None       |
-
-README、`.gitignore`、LICENSEは既にプロジェクトへ含まれているため、GitHub側で自動生成しません。
-
-## 5. ローカルでGitを開始する
-
-まだ`.git`がないことを確認して実行します。
-
-```zsh
-git init -b main
-git status
-git add .
-git diff --cached --stat
-git diff --cached
-git commit -S -m "Initial secure SnapFlow v1.0.0 project"
-```
-
-`git diff --cached`が長くても、秘密鍵、トークン、個人情報がないことを確認します。
-
-GitHubで表示されたURLを使ってRemoteを登録します。
-
-```zsh
-git remote add origin git@github.com:Pentagon22GIT/SnapFlow.git
-git remote -v
-git push -u origin main
-```
-
-Pushはコミット済みの履歴をGitHubへ送ります。未コミットのファイルは送られません。
-
-## 6. GitHubの安全設定
-
-### General
-
-- Default branchを`main`にします。
-- `Automatically delete head branches`を有効にします。
-- Merge方式は最初は`Squash merging`だけでも構いません。
-- WikiやProjectsを使わない場合は無効化し、管理対象を減らします。
-
-### Rules / Branch protection
-
-`main`を対象に次を設定します。
-
-- Pull Request経由の変更を要求
-- CIの`build-and-test`成功を要求
-- CodeQLの成功を要求
-- Force Pushを禁止
-- Branch deletionを禁止
-- 可能なら署名済みコミットを要求
-
-一人開発では「1人以上の承認必須」を有効にすると自分のPull Requestを自分で承認できず停止することがあります。レビュー承認は必須にせず、差分確認と自動検査をRelease条件にします。
-
-`v*`タグを対象にしたTag rulesetも作り、公開済みタグの更新と削除を禁止します。
 
 ### Actions
 
@@ -305,10 +384,14 @@ identifier "dev.pent.SnapFlow" and certificate leaf = H"設定したSHA-1"
 
 1. mainのCIとCodeQLを成功させる。
 2. `VERSION`を`1.0.0`、`BUILD_NUMBER`を`1`にする。
-3. 署名済み注釈タグ`v1.0.0`を作る。
+3. 署名済み注釈タグ`v1.0.0`をローカルだけに作成し、署名と対象コミットを検証する。
 4. `package-release.sh`で公式版を生成する。
-5. ZIP、SHA-256、manifestをGitHub Releaseへ添付する。
-6. Releaseを公開後、別フォルダへ再ダウンロードして検証する。
+5. ZIP、SHA-256、manifest、展開後のアプリ、コード署名をローカルで検証する。
+6. すべての検証に成功した場合だけ、タグをGitHubへpushする。
+7. GitHub上でタグの`Verified`表示と対象コミットを確認する。
+8. ZIP、SHA-256、manifestをGitHub Releaseへ添付して公開する。
+9. 公開後、別フォルダへ3ファイルを再ダウンロードして検証する。
+10. `releases/latest`とアプリの「更新を確認…」が新しいReleaseを開くことを確認する。
 
 ## 11. GitHubアカウントの侵害対策
 
