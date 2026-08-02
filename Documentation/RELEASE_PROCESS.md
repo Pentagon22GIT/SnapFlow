@@ -31,7 +31,7 @@ Semantic Versioningに従います。
 
 例としてv1.0.0を作成します。この時点ではタグをGitHubへpushしません。
 
-````zsh
+```zsh
 git switch main
 git pull --ff-only origin main
 git status --short
@@ -40,12 +40,21 @@ git verify-tag v1.0.0
 
 test "$(git rev-parse HEAD)" = "$(git rev-parse 'v1.0.0^{commit}')" \
   && echo "タグは現在のmainを指しています"
+```
+
+タグ署名が正しく、タグが意図したmainのコミットを指していることを確認します。成果物の生成とローカル検証が完了するまでは、タグをGitHubへpushしません。
+
+問題が見つかり、タグをまだGitHubへpushしていない場合は、ローカルタグを削除して修正後に作り直せます。
+
+```zsh
+git tag -d v1.0.0
+```
 
 ## Release資産の生成
 
 ```zsh
 ./Scripts/package-release.sh
-````
+```
 
 生成先は次です。
 
@@ -72,8 +81,25 @@ release/v1.0.0/
 ```zsh
 ./Scripts/verify-official.sh build/official/SnapFlow.app
 lipo -archs build/official/SnapFlow.app/Contents/MacOS/SnapFlow
-shasum -a 256 -c release/v1.0.0/SnapFlow-1.0.0.sha256
 plutil -p release/v1.0.0/release-manifest.json
+
+(
+  cd release/v1.0.0
+  shasum -a 256 -c SnapFlow-1.0.0.sha256
+)
+
+checksum_hash="$(awk '{print $1}' \
+  release/v1.0.0/SnapFlow-1.0.0.sha256)"
+manifest_hash="$(plutil -extract archiveSHA256 raw -o - \
+  release/v1.0.0/release-manifest.json)"
+manifest_commit="$(plutil -extract sourceCommit raw -o - \
+  release/v1.0.0/release-manifest.json)"
+
+test "$checksum_hash" = "$manifest_hash" \
+  && echo "SHA-256ファイルとmanifestは一致しています"
+
+test "$manifest_commit" = "$(git rev-parse 'v1.0.0^{commit}')" \
+  && echo "manifestとタグの対象コミットは一致しています"
 ```
 
 さらに、Release ZIPを一時フォルダへ展開し、その中のアプリを検証します。
@@ -85,6 +111,25 @@ ditto -x -k release/v1.0.0/SnapFlow-1.0.0.zip "$release_check_dir"
 ```
 
 確認後、一時フォルダだけを削除します。
+
+## タグをGitHubへ公開する
+
+Release成果物、SHA-256、manifest、展開後のアプリ、コード署名、Designated Requirementの検証がすべて成功した場合だけ、タグをGitHubへpushします。
+
+```zsh
+git status --short
+git verify-tag v1.0.0
+git push origin v1.0.0
+git ls-remote --tags origin refs/tags/v1.0.0
+```
+
+GitHubのTags画面で次を確認します。
+
+- タグ`v1.0.0`が`Verified`と表示される
+- タグが意図したmainのコミットを指している
+- Release成果物の`release-manifest.json`に記録された`sourceCommit`と一致する
+
+タグをGitHubへpushした後は、同じタグの付け替え、削除、成果物の黙った差し替えを行いません。問題が見つかった場合は、影響を明示してReleaseを取り下げ、新しいPatchバージョンで修正します。
 
 ## GitHub Release
 

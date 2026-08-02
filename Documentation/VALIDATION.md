@@ -19,7 +19,7 @@
 - 更新確認の通信経路が公式`releases/latest`をブラウザで開く処理だけであることの確認
 - quarantine削除、強制終了、設定ファイルの`source`が新スクリプトに存在しないことの確認
 - GitHub Actions参照が完全なコミットSHAへ固定されていることの確認
-- `.p12`、`.pfx`、`.key`、`.pem`が現在のGit管理対象およびGit履歴に存在しないことの確認
+- `.p12`、`.pfx`、`.key`、`.pem`が現在の公開準備ツリーに存在しないことの確認
 - 既知形式の秘密鍵、GitHub Token、AWS Access Key候補が追跡ファイルから検出されないことの確認
 - Apache License 2.0本文が公式本文と一致することの確認
 
@@ -60,27 +60,31 @@
 - 複数Spaceにおける基本動作とSpace変更時の取消を確認
 - 「更新を確認…」が公式`releases/latest`を既定ブラウザで開くことを確認
 
-## 完了したGitHub検証
+## 新しいGitHubリポジトリで再実施する検証
 
-- 公開リポジトリを作成
-- `main`をPull Request経由、署名済みコミット、CI成功必須として保護
-- `main`の削除とForce Pushを禁止
-- `v*`を対象とするTag Rulesetを作成
-- Releaseタグの更新、削除、Force Pushを禁止
-- Actionsの標準権限を読み取り専用に設定
-- GitHub公式Actionのみを許可
-- Action参照の完全なコミットSHA固定を要求
-- 外部ContributorのWorkflow実行にMaintainerの承認を要求
-- 最新mainの`build-and-test`成功
-- 最新mainのCodeQL `Analyze`成功
-- Dependabotによる`actions/checkout v7.0.1`更新を確認して統合
-- Dependency graphを有効化
-- Dependabot alertsとsecurity updatesを有効化
-- Private vulnerability reportingを有効化
-- Secret Protectionを有効化
-- Push protectionを有効化
-- CodeQL Advanced setupを有効化
-- Gitコミット署名とタグ署名に専用SSH鍵を設定
+Git履歴の再初期化に伴い、GitHub側の検証記録も新しいリポジトリを基準に作り直します。以下は新リポジトリで再確認できるまで完了扱いにしません。
+
+- [x] Private状態で初回コミットをPushし、公開対象を監査
+- [x] 初回コミットのAuthorとCommitterがGitHubのnoreplyアドレスであることを確認
+- [x] 初回コミットが`Verified`であることを確認
+- [x] 監査後にリポジトリをPublicへ変更
+- [x] `main`をPull Request経由、署名済みコミット、CI成功必須として保護
+- [x] `main`の削除とForce Pushを禁止
+- [x] `v*`を対象とするTag Rulesetを作成
+- [x] Releaseタグの更新、削除、Force Pushを禁止
+- [x] Actionsの標準権限を読み取り専用に設定
+- [x] GitHub公式Actionのみを許可
+- [x] Action参照の完全なコミットSHA固定を要求
+- [x] 外部ContributorのWorkflow実行にMaintainerの承認を要求
+- [x] 最新mainの`build-and-test`成功
+- [x] 最新mainのCodeQL `Analyze`成功
+- [x] Dependency graphを有効化
+- [x] Dependabot alertsとsecurity updatesを有効化
+- [x] Private vulnerability reportingを有効化
+- [x] Secret Protectionを有効化
+- [x] Push protectionを有効化
+- [x] CodeQL Advanced setupを有効化
+- [x] Gitコミット署名とタグ署名に専用SSH鍵を設定
 
 ## 公開までに残る検証
 
