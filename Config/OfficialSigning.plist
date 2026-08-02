@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>BundleIdentifier</key>
+    <string>dev.pent.SnapFlow</string>
+    <key>CertificateSHA1</key>
+    <string>26479A3C344B9500A9CEFDBD00FB1A086C3D1295</string>
+</dict>
+</plist>

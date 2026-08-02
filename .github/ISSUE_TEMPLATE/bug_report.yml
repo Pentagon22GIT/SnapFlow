@@ -1,0 +1,42 @@
+name: バグ報告
+description: SnapFlowの再現可能な不具合を報告します。脆弱性はSecurity Advisoryから非公開で報告してください。
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        認証情報、画面内容、個人情報は添付しないでください。セキュリティ上の問題は公開Issueへ書かず、SECURITY.mdの手順を使用してください。
+  - type: input
+    id: version
+    attributes:
+      label: SnapFlowバージョン
+      placeholder: 1.0.0
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOSバージョン
+      placeholder: macOS 15.6
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現手順
+      description: 機密情報を含めず、最小限の手順を書いてください。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待した動作
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 実際の動作
+    validations:
+      required: true

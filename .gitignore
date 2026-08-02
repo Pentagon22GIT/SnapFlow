@@ -1,0 +1,12 @@
+.DS_Store
+.build/
+build/
+release/
+DerivedData/
+*.p12
+*.pfx
+*.key
+*.pem
+*.mobileprovision
+Config/*.local.*
+!.gitkeep

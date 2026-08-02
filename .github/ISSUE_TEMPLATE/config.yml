@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 脆弱性を非公開で報告
+    url: https://github.com/Pentagon22GIT/SnapFlow/security/advisories/new
+    about: 権限不正利用、情報漏えい、署名・更新経路の問題は公開Issueへ書かないでください。
