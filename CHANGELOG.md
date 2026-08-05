@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-08-05
+
+### Fixed
+
+- 連動リサイズ後、実際に連動したウィンドウを前面へ戻し、最後に操作ウィンドウを最前面へ戻すよう修正
+- 連動先の前面化でアプリの入力フォーカスを奪わないよう、ウィンドウのZ-order更新とアプリのアクティブ化を分離
+
 ## [1.1.0] - 2026-08-05
 
 ### Added
@@ -60,6 +67,7 @@
 - GitHub Actions、CodeQL、Dependabot、テスト
 - Security Policy、Privacy Policy、Threat Model、Release手順、監査報告
 
-[Unreleased]: https://github.com/Pentagon22GIT/SnapFlow/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/Pentagon22GIT/SnapFlow/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/Pentagon22GIT/SnapFlow/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/Pentagon22GIT/SnapFlow/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Pentagon22GIT/SnapFlow/releases/tag/v1.0.0
