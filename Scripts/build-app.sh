@@ -42,14 +42,22 @@ readonly SWIFT_BIN="$(/usr/bin/xcrun --find swift)"
 [[ -x "$SWIFT_BIN" ]] || fail "Swiftツールチェーンが見つかりません。"
 
 SOURCE_REVISION="unversioned"
+SOURCE_DIRTY="false"
 if /usr/bin/git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   if SOURCE_REVISION_CANDIDATE="$(/usr/bin/git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null)"; then
     SOURCE_REVISION="$SOURCE_REVISION_CANDIDATE"
   fi
+  if [[ -n "$(/usr/bin/git -C "$ROOT" status --porcelain --untracked-files=normal)" ]]; then
+    SOURCE_DIRTY="true"
+  fi
 fi
 [[ "$SOURCE_REVISION" == "unversioned" || "$SOURCE_REVISION" =~ '^[0-9a-f]{40}$' ]] || \
   fail "ソースリビジョンを検証できません。"
-readonly SOURCE_REVISION
+if [[ "$EDITION" == "official" ]]; then
+  [[ "$SOURCE_REVISION" != "unversioned" ]] || fail "公式版はGit管理されたソースからビルドしてください。"
+  [[ "$SOURCE_DIRTY" == "false" ]] || fail "公式版は未コミット・未追跡の変更がない状態でビルドしてください。"
+fi
+readonly SOURCE_REVISION SOURCE_DIRTY
 
 echo "Building SnapFlow $VERSION ($EDITION)..."
 cd "$ROOT"
@@ -94,6 +102,11 @@ esac
   "利用者が有効にした場合に、配置候補のプレビュー画像を表示するために使用します。" "$INFO_PLIST"
 /usr/bin/plutil -insert SnapFlowEdition -string "$EDITION" "$INFO_PLIST"
 /usr/bin/plutil -insert SnapFlowSourceRevision -string "$SOURCE_REVISION" "$INFO_PLIST"
+if [[ "$SOURCE_DIRTY" == "true" ]]; then
+  /usr/bin/plutil -insert SnapFlowSourceDirty -bool YES "$INFO_PLIST"
+else
+  /usr/bin/plutil -insert SnapFlowSourceDirty -bool NO "$INFO_PLIST"
+fi
 
 if [[ "$EDITION" == "official" ]]; then
   [[ -f "$OFFICIAL_CONFIG" ]] || fail "Config/OfficialSigning.plistがありません。"

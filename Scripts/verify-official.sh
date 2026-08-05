@@ -23,8 +23,12 @@ readonly CERTIFICATE_SHA1="$(/usr/libexec/PlistBuddy -c 'Print :CertificateSHA1'
 
 readonly ACTUAL_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")"
 readonly ACTUAL_EDITION="$(/usr/libexec/PlistBuddy -c 'Print :SnapFlowEdition' "$APP/Contents/Info.plist")"
+readonly ACTUAL_SOURCE_REVISION="$(/usr/libexec/PlistBuddy -c 'Print :SnapFlowSourceRevision' "$APP/Contents/Info.plist")"
+readonly ACTUAL_SOURCE_DIRTY="$(/usr/libexec/PlistBuddy -c 'Print :SnapFlowSourceDirty' "$APP/Contents/Info.plist")"
 [[ "$ACTUAL_BUNDLE_ID" == "$EXPECTED_BUNDLE_ID" ]] || fail "Bundle IDが公式設定と一致しません。"
 [[ "$ACTUAL_EDITION" == "official" ]] || fail "公式Editionではありません。"
+[[ "$ACTUAL_SOURCE_REVISION" =~ '^[0-9a-f]{40}$' ]] || fail "公式版のソースリビジョンが不正です。"
+[[ "$ACTUAL_SOURCE_DIRTY" == "false" ]] || fail "未コミットのソースから作成された公式版です。"
 
 /usr/bin/codesign --verify --strict --verbose=4 "$APP"
 /usr/bin/lipo "$APP/Contents/MacOS/SnapFlow" -verify_arch arm64 x86_64 || \

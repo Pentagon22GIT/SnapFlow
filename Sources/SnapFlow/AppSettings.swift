@@ -61,16 +61,45 @@ final class AppSettings {
     private let edgeThresholdKey = "snapEdgeThreshold"
     private let cornerBandKey = "snapCornerBand"
     private let restoreSizeOnMoveKey = "restoreSnappedWindowSizeOnMove"
+    private let linkedResizeEnabledKey = "linkedResizeEnabled"
     private let sideDwellExpansionEnabledKey = "sideDwellExpansionEnabled"
     private let sideDwellDurationKey = "sideDwellDuration"
     private let windowPreviewsEnabledKey = "windowPreviewsEnabled"
+    private let layoutIntrusionToleranceKey = "layoutIntrusionTolerance"
+    private let legacySplitDetachmentThresholdKey = "splitDetachmentThreshold"
 
     static let defaultEdgeThreshold: Double = 26
     static let defaultCornerBand: Double = 120
     static let defaultSideDwellDuration: Double = 2
+    static let defaultLayoutIntrusionTolerance: Double = 0.5
     static let edgeThresholdRange: ClosedRange<Double> = 8...80
     static let cornerBandRange: ClosedRange<Double> = 60...300
     static let sideDwellDurationRange: ClosedRange<Double> = 0.5...5
+    static let layoutIntrusionToleranceRange: ClosedRange<Double> = 0.1...0.9
+
+    var layoutIntrusionTolerance: Double {
+        get {
+            if defaults.object(forKey: layoutIntrusionToleranceKey) != nil {
+                return Self.layoutIntrusionToleranceRange.clamped(
+                    defaults.double(forKey: layoutIntrusionToleranceKey)
+                )
+            }
+            if defaults.object(forKey: legacySplitDetachmentThresholdKey) != nil {
+                return Self.layoutIntrusionToleranceRange.clamped(
+                    defaults.double(forKey: legacySplitDetachmentThresholdKey)
+                )
+            }
+            return Self.defaultLayoutIntrusionTolerance
+        }
+        set {
+            defaults.set(
+                Self.layoutIntrusionToleranceRange.clamped(newValue),
+                forKey: layoutIntrusionToleranceKey
+            )
+            defaults.removeObject(forKey: legacySplitDetachmentThresholdKey)
+            notify()
+        }
+    }
 
     var windowPreviewsEnabled: Bool {
         get {
@@ -94,6 +123,19 @@ final class AppSettings {
         }
         set {
             defaults.set(newValue, forKey: restoreSizeOnMoveKey)
+            notify()
+        }
+    }
+
+    var linkedResizeEnabled: Bool {
+        get {
+            guard defaults.object(forKey: linkedResizeEnabledKey) != nil else {
+                return true
+            }
+            return defaults.bool(forKey: linkedResizeEnabledKey)
+        }
+        set {
+            defaults.set(newValue, forKey: linkedResizeEnabledKey)
             notify()
         }
     }
@@ -168,13 +210,6 @@ final class AppSettings {
         defaults.removeObject(forKey: cornerBandKey)
         defaults.removeObject(forKey: sideDwellExpansionEnabledKey)
         defaults.removeObject(forKey: sideDwellDurationKey)
-        notify()
-    }
-
-    func resetAll() {
-        defaults.removePersistentDomain(
-            forName: Bundle.main.bundleIdentifier ?? "dev.pent.SnapFlow"
-        )
         notify()
     }
 

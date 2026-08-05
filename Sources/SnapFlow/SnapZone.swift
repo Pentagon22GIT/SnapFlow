@@ -34,7 +34,10 @@ enum SnapZone: String, Equatable, CaseIterable, Codable {
     }
 
     func frame(in screen: NSScreen) -> CGRect {
-        let f = screen.visibleFrame
+        frame(in: screen.visibleFrame)
+    }
+
+    func frame(in f: CGRect) -> CGRect {
         let halfW = floor(f.width / 2)
         let halfH = floor(f.height / 2)
 
