@@ -667,9 +667,14 @@ final class AXWindowService {
         copyAttribute(window, "AXFullScreen" as CFString) ?? false
     }
 
+    @discardableResult
+    func raise(_ window: ManagedWindow) -> Bool {
+        AXUIElementPerformAction(window.element, kAXRaiseAction as CFString) == .success
+    }
+
     func focus(_ window: ManagedWindow) {
         NSRunningApplication(processIdentifier: window.pid)?.activate(options: [.activateIgnoringOtherApps])
-        AXUIElementPerformAction(window.element, kAXRaiseAction as CFString)
+        raise(window)
     }
 
     func waitForPlacementReadiness(

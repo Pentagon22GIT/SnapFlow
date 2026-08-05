@@ -1155,6 +1155,16 @@ final class SnapController {
                             self.detachedConnections.insert(connection)
                         }
                     }
+                    let connectedFollowers = applications.compactMap { application -> ManagedWindow? in
+                        guard connectionResults[application.connection] == true else {
+                            return nil
+                        }
+                        return acceptedWindows[application.identity]
+                    }
+                    for follower in connectedFollowers {
+                        self.windowService.raise(follower)
+                    }
+                    self.windowService.focus(driver)
                 }
                 self.inFlightPlacementIDs.subtract(operationIDs)
                 self.virtualResizeOverlay.hideAll()

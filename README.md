@@ -137,7 +137,7 @@ Accessibilityは強い権限です。GitHub Releases以外から入手したア�
 Releaseファイルを置いたフォルダで実行します。
 
 ```zsh
-shasum -a 256 -c SnapFlow-1.1.0.sha256
+shasum -a 256 -c SnapFlow-1.1.1.sha256
 ```
 
 SHA-256は、ダウンロードしたZIPがRelease作成時のファイルと一致するかを確認するためのものです。ZIPと`.sha256`を同じReleaseから取得するため、SHA-256だけでは配布元の本人性を独立に証明できません。公式GitHubリポジトリ、署名済みReleaseタグ、アプリのコード署名を組み合わせて確認してください。
@@ -153,7 +153,7 @@ codesign --verify --strict --verbose=4 \
   SnapFlow.app
 ```
 
-v1.1.0では、表示されたBundle IDが`dev.pent.SnapFlow`であること、証明書SHA-1が`26479A3C344B9500A9CEFDBD00FB1A086C3D1295`であること、Designated Requirementと`release-manifest.json`が同じ値を示すことを確認します。SHA-1はこの証明書をDesignated Requirement内で識別するために使用しており、配布ファイルの完全性確認にはSHA-256を使用します。名前だけの一致は公式版の証明になりません。
+v1.1.1では、表示されたBundle IDが`dev.pent.SnapFlow`であること、証明書SHA-1が`26479A3C344B9500A9CEFDBD00FB1A086C3D1295`であること、Designated Requirementと`release-manifest.json`が同じ値を示すことを確認します。SHA-1はこの証明書をDesignated Requirement内で識別するために使用しており、配布ファイルの完全性確認にはSHA-256を使用します。名前だけの一致は公式版の証明になりません。
 
 ## 更新
 
