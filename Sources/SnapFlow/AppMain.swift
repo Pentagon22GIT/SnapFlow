@@ -67,7 +67,7 @@ final class SnapFlowApp: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "更新を確認…", action: #selector(checkForUpdates), keyEquivalent: "")
         menu.addItem(withTitle: "設定…", action: #selector(openSettings), keyEquivalent: ",")
         menu.addItem(withTitle: "アクセシビリティ設定を開く", action: #selector(openAccessibilitySettings), keyEquivalent: "")
-        menu.addItem(withTitle: "状態をリセット", action: #selector(resetSettings), keyEquivalent: "")
+        menu.addItem(withTitle: "状態をリセット", action: #selector(resetState), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "SnapFlowを終了", action: #selector(quit), keyEquivalent: "q")
         menu.items.forEach { $0.target = self }
@@ -113,7 +113,7 @@ final class SnapFlowApp: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.open(url)
     }
 
-    @objc private func resetSettings() {
+    @objc private func resetState() {
         controller.reset()
     }
 

@@ -28,4 +28,6 @@ jobs:
       - name: Verify Community identity
         run: |
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' 'build/community/SnapFlow Community.app/Contents/Info.plist')" = "dev.pent.SnapFlow.community"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :SnapFlowSourceRevision' 'build/community/SnapFlow Community.app/Contents/Info.plist')" = "$(git rev-parse HEAD)"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :SnapFlowSourceDirty' 'build/community/SnapFlow Community.app/Contents/Info.plist')" = "false"
           codesign --verify --strict --verbose=2 'build/community/SnapFlow Community.app'

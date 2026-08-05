@@ -26,13 +26,16 @@ readonly CURRENT_TAG="$(/usr/bin/git -C "$ROOT" describe --tags --exact-match HE
 
 "$SCRIPT_DIR/build-official.sh"
 "$SCRIPT_DIR/verify-official.sh" "$APP"
+readonly SOURCE_REVISION="$(/usr/bin/git -C "$ROOT" rev-parse HEAD)"
+readonly APP_SOURCE_REVISION="$(/usr/libexec/PlistBuddy -c 'Print :SnapFlowSourceRevision' "$APP/Contents/Info.plist")"
+[[ "$APP_SOURCE_REVISION" == "$SOURCE_REVISION" ]] || \
+  fail "公式アプリのソースリビジョンがRelease対象コミットと一致しません。"
 
 /bin/rm -rf "$RELEASE_DIR"
 /bin/mkdir -p "$RELEASE_DIR"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "$ARCHIVE"
 
 readonly ARCHIVE_SHA256="$(/usr/bin/shasum -a 256 "$ARCHIVE" | /usr/bin/awk '{print $1}')"
-readonly SOURCE_REVISION="$(/usr/bin/git -C "$ROOT" rev-parse HEAD)"
 readonly CERTIFICATE_SHA1="$(/usr/libexec/PlistBuddy -c 'Print :CertificateSHA1' "$ROOT/Config/OfficialSigning.plist" | /usr/bin/tr '[:lower:]' '[:upper:]')"
 echo "$ARCHIVE_SHA256  $(/usr/bin/basename "$ARCHIVE")" > "$CHECKSUM_FILE"
 

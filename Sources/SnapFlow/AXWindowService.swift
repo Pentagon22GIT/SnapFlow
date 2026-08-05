@@ -15,6 +15,32 @@ struct ManagedWindow {
     var stableIdentity: String {
         return "ax:\(pid):\(CFHash(element))"
     }
+
+    func replacingFrame(_ newFrame: CGRect) -> ManagedWindow {
+        ManagedWindow(
+            element: element,
+            pid: pid,
+            title: title,
+            appIcon: appIcon,
+            frame: newFrame,
+            isMinimized: isMinimized,
+            isFullscreen: isFullscreen,
+            cgWindowID: cgWindowID
+        )
+    }
+
+    func replacingCGWindowID(_ newWindowID: CGWindowID?) -> ManagedWindow {
+        ManagedWindow(
+            element: element,
+            pid: pid,
+            title: title,
+            appIcon: appIcon,
+            frame: frame,
+            isMinimized: isMinimized,
+            isFullscreen: isFullscreen,
+            cgWindowID: newWindowID
+        )
+    }
 }
 
 struct WindowSnapshot {
@@ -65,6 +91,47 @@ final class AXWindowService {
             app: app,
             cgWindowID: window.cgWindowID
         )
+    }
+
+    func refreshedFrame(_ window: ManagedWindow) -> CGRect? {
+        guard let app = NSRunningApplication(processIdentifier: window.pid),
+              !app.isTerminated else { return nil }
+        return frame(of: window.element)
+    }
+
+    func resolvingWindowServerIdentity(_ window: ManagedWindow) -> ManagedWindow {
+        guard window.cgWindowID == nil else { return window }
+        let candidates = onscreenWindowRecords().filter {
+            $0.pid == window.pid && visibleGeometryMatches(axWindow: window, cgWindow: $0)
+        }
+        guard let match = candidates.min(by: { lhs, rhs in
+            let lhsScore = matchScore(axWindow: window, cgWindow: lhs)
+            let rhsScore = matchScore(axWindow: window, cgWindow: rhs)
+            if lhsScore == rhsScore {
+                return lhs.zIndex < rhs.zIndex
+            }
+            return lhsScore > rhsScore
+        }) else { return window }
+        return window.replacingCGWindowID(match.id)
+    }
+
+    func windowServerFrame(_ window: ManagedWindow) -> CGRect? {
+        guard let windowID = window.cgWindowID else { return nil }
+        let requestedIDs = [NSNumber(value: windowID)] as CFArray
+        let descriptions = CGWindowListCreateDescriptionFromArray(requestedIDs)
+            as? [[String: Any]] ?? []
+        guard let item = descriptions.first(where: {
+            ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID
+        }),
+              (item[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == window.pid,
+              ((item[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0) == 0 else {
+            return nil
+        }
+        let boundsDictionary = item[kCGWindowBounds as String] as? [String: Any] ?? [:]
+        guard let bounds = CGRect(
+            dictionaryRepresentation: boundsDictionary as CFDictionary
+        ), bounds.width > 0, bounds.height > 0 else { return nil }
+        return cgBoundsToCocoa(bounds)
     }
 
     func visibleWindows(excludingStableIDs excludedStableIDs: Set<String> = []) -> [ManagedWindow] {

@@ -6,6 +6,7 @@ final class OverlayPanel {
 
     private let panel: NSPanel
     private var isShowing = false
+    private var displayedTargetFrame: CGRect?
     private let zoneColor = NSColor(
         srgbRed: CGFloat(0x50) / 255,
         green: CGFloat(0x8D) / 255,
@@ -39,7 +40,9 @@ final class OverlayPanel {
     func show(frame: CGRect, from anchor: CGPoint) {
         let targetFrame = frame.insetBy(dx: 6, dy: 6)
         let wasShowing = isShowing
+        if wasShowing, displayedTargetFrame == targetFrame { return }
         isShowing = true
+        displayedTargetFrame = targetFrame
 
         if !wasShowing {
             let initialSize: CGFloat = 28
@@ -91,6 +94,7 @@ final class OverlayPanel {
 
     func hide() {
         isShowing = false
+        displayedTargetFrame = nil
         panel.contentView?.layer?.removeAllAnimations()
         panel.alphaValue = 1
         panel.orderOut(nil)

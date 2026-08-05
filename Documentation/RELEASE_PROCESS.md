@@ -26,6 +26,7 @@ Semantic Versioningに従います。
 - [ ] 公式証明書SHA-1が公開設定と一致
 - [ ] ReleaseノートとCHANGELOGを準備
 - [ ] 権限、保存、通信、依存関係の変更を明記
+- [ ] `SnapFlowSourceRevision`がRelease対象コミット、`SnapFlowSourceDirty`が`false`である
 
 ## ローカルでタグを作成する
 
@@ -75,6 +76,7 @@ release/v1.0.0/
 - Hardened Runtimeが無効
 - 実行ファイルがUniversal 2（arm64／x86_64）ではない
 - コード署名検証の失敗
+- 公式アプリに記録されたソースリビジョンとRelease対象コミットの不一致
 
 ## 手動検証
 
@@ -82,6 +84,8 @@ release/v1.0.0/
 ./Scripts/verify-official.sh build/official/SnapFlow.app
 lipo -archs build/official/SnapFlow.app/Contents/MacOS/SnapFlow
 plutil -p release/v1.0.0/release-manifest.json
+plutil -extract SnapFlowSourceRevision raw -o - build/official/SnapFlow.app/Contents/Info.plist
+plutil -extract SnapFlowSourceDirty raw -o - build/official/SnapFlow.app/Contents/Info.plist
 
 (
   cd release/v1.0.0

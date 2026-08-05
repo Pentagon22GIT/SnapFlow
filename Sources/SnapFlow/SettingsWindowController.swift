@@ -17,6 +17,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         target: nil,
         action: nil
     )
+    private let linkedResizeCheckbox = NSButton(
+        checkboxWithTitle: "スナップ済みウィンドウを連動してリサイズ",
+        target: nil,
+        action: nil
+    )
     private let edgeThresholdSlider = NSSlider()
     private let edgeThresholdValue = NSTextField(labelWithString: "")
     private let cornerBandSlider = NSSlider()
@@ -28,10 +33,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     )
     private let sideDwellDurationSlider = NSSlider()
     private let sideDwellDurationValue = NSTextField(labelWithString: "")
+    private let layoutIntrusionSlider = NSSlider()
+    private let layoutIntrusionValue = NSTextField(labelWithString: "")
 
     init() {
         let window = NSWindow(
-            contentRect: CGRect(x: 0, y: 0, width: 580, height: 760),
+            contentRect: CGRect(x: 0, y: 0, width: 580, height: 820),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -121,6 +128,28 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         restoreSizeNote.textColor = .secondaryLabelColor
         restoreSizeNote.maximumNumberOfLines = 0
         stack.addArrangedSubview(restoreSizeNote)
+
+        linkedResizeCheckbox.target = self
+        linkedResizeCheckbox.action = #selector(toggleLinkedResize)
+        stack.addArrangedSubview(linkedResizeCheckbox)
+        let linkedResizeNote = NSTextField(
+            wrappingLabelWithString: "オンの場合は、スナップ済みウィンドウの共有辺を動かすと、連動先を仮想ボックスで表示してMouseUp後にまとめてリサイズします。オフの場合は手動リサイズ時の連動を行わず、通常のスナップはそのまま利用できます。"
+        )
+        linkedResizeNote.textColor = .secondaryLabelColor
+        linkedResizeNote.maximumNumberOfLines = 0
+        stack.addArrangedSubview(linkedResizeNote)
+
+        configureSlider(
+            layoutIntrusionSlider,
+            range: AppSettings.layoutIntrusionToleranceRange,
+            action: #selector(changeLayoutIntrusionTolerance(_:))
+        )
+        stack.addArrangedSubview(settingRow(
+            title: "レイアウトの重なり許容度",
+            detail: "各ウィンドウで観測した制約サイズを基準にします。小さくすると新規スナップの再分割や、既存スプリットからの離脱が起こりやすくなります。",
+            slider: layoutIntrusionSlider,
+            valueLabel: layoutIntrusionValue
+        ))
 
         stack.addArrangedSubview(separator())
         stack.addArrangedSubview(sectionTitle("ドラッグ判定"))
@@ -264,6 +293,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         launchCheckbox.state = settings.launchAtLogin ? .on : .off
         windowPreviewsCheckbox.state = settings.windowPreviewsEnabled ? .on : .off
         restoreSizeOnMoveCheckbox.state = settings.restoreSnappedWindowSizeOnMove ? .on : .off
+        linkedResizeCheckbox.state = settings.linkedResizeEnabled ? .on : .off
         sideDwellExpansionCheckbox.state = settings.sideDwellExpansionEnabled ? .on : .off
         sideDwellDurationSlider.isEnabled = settings.sideDwellExpansionEnabled
         sideDwellDurationValue.textColor = settings.sideDwellExpansionEnabled ? .labelColor : .tertiaryLabelColor
@@ -273,6 +303,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         edgeThresholdValue.stringValue = "\(Int(settings.edgeThreshold.rounded())) pt"
         cornerBandSlider.doubleValue = settings.cornerBand
         cornerBandValue.stringValue = "\(Int(settings.cornerBand.rounded())) pt"
+        layoutIntrusionSlider.doubleValue = settings.layoutIntrusionTolerance
+        layoutIntrusionValue.stringValue = "\(Int((settings.layoutIntrusionTolerance * 100).rounded())) %"
 
         let values = settings.shortcuts
         for action in ShortcutAction.allCases {
@@ -298,6 +330,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let value = (sender.doubleValue * 10).rounded() / 10
         settings.sideDwellDuration = value
         sideDwellDurationValue.stringValue = String(format: "%.1f 秒", value)
+    }
+
+    @objc private func changeLayoutIntrusionTolerance(_ sender: NSSlider) {
+        let value = (sender.doubleValue * 20).rounded() / 20
+        settings.layoutIntrusionTolerance = value
+        layoutIntrusionValue.stringValue = "\(Int((value * 100).rounded())) %"
     }
 
     @objc private func toggleSideDwellExpansion() {
@@ -328,6 +366,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func toggleRestoreSizeOnMove() {
         settings.restoreSnappedWindowSizeOnMove = restoreSizeOnMoveCheckbox.state == .on
+    }
+
+    @objc private func toggleLinkedResize() {
+        settings.linkedResizeEnabled = linkedResizeCheckbox.state == .on
     }
 
     @objc private func clearShortcuts() {

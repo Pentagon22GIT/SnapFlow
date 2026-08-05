@@ -93,21 +93,21 @@ final class WindowPickerPanel: NSObject {
 
     func show(
         windows: [ManagedWindow],
-        zones: [SnapZone],
-        screen: NSScreen,
+        zoneFrames: [SnapZone: CGRect],
         previewProvider: @escaping (CGWindowID?) -> CGImage?,
         onCancel: @escaping () -> Void,
         onSelect: @escaping (ManagedWindow, SnapZone) -> Void
     ) {
         hide(notifyCancel: false)
-        guard !windows.isEmpty, !zones.isEmpty else { return }
+        guard !windows.isEmpty, !zoneFrames.isEmpty else { return }
         self.onSelect = onSelect
         self.onCancel = onCancel
         let previewLoader = PreviewImageLoader(provider: previewProvider)
         self.previewLoader = previewLoader
 
-        for zone in zones {
-            let panel = makePanel(frame: zone.frame(in: screen))
+        for zone in SnapZone.allCases {
+            guard let frame = zoneFrames[zone], frame.width >= 80, frame.height >= 80 else { continue }
+            let panel = makePanel(frame: frame)
             let content = PickerZoneView(
                 windows: windows,
                 zone: zone,
@@ -123,6 +123,9 @@ final class WindowPickerPanel: NSObject {
             panel.contentView = content
             panel.orderFrontRegardless()
             panels.append(panel)
+        }
+        if panels.isEmpty {
+            hide(notifyCancel: true)
         }
     }
 
@@ -290,20 +293,22 @@ private final class CenteredCardCanvas: NSView {
     func relayout() {
         guard viewportSize.width > 0 else { return }
 
-        let available = max(viewportSize.width - horizontalPadding * 2, 220)
-        let preferredWidth = min(max(available * 0.34, 250), 340)
+        let effectiveHorizontalPadding = min(horizontalPadding, max(viewportSize.width * 0.08, 8))
+        let effectiveVerticalPadding = min(verticalPadding, max(viewportSize.height * 0.08, 8))
+        let available = max(viewportSize.width - effectiveHorizontalPadding * 2, 1)
+        let preferredWidth = min(max(available * 0.34, 180), 340)
         let columns = max(1, Int((available + spacingX) / (preferredWidth + spacingX)))
-        let cardWidth = min(340, max(235, (available - CGFloat(max(columns - 1, 0)) * spacingX) / CGFloat(columns)))
-        let previewHeight = cardWidth * 0.60
-        let cardHeight = previewHeight + 34
+        let cardWidth = min(340, max(64, (available - CGFloat(max(columns - 1, 0)) * spacingX) / CGFloat(columns)))
+        let previewHeight = cardWidth < 160 ? min(cardWidth, 88) : cardWidth * 0.60
+        let cardHeight = previewHeight + (cardWidth < 120 ? 0 : 34)
         let rows = max(1, Int(ceil(Double(cards.count) / Double(columns))))
         let contentHeight = CGFloat(rows) * cardHeight + CGFloat(max(rows - 1, 0)) * spacingY
-        let canvasHeight = max(viewportSize.height, contentHeight + verticalPadding * 2)
+        let canvasHeight = max(viewportSize.height, contentHeight + effectiveVerticalPadding * 2)
         frame.size = CGSize(width: viewportSize.width, height: canvasHeight)
 
         let totalWidth = CGFloat(columns) * cardWidth + CGFloat(max(columns - 1, 0)) * spacingX
-        let startX = max((viewportSize.width - totalWidth) / 2, horizontalPadding)
-        let startY = max((canvasHeight - contentHeight) / 2, verticalPadding)
+        let startX = max((viewportSize.width - totalWidth) / 2, effectiveHorizontalPadding)
+        let startY = max((canvasHeight - contentHeight) / 2, effectiveVerticalPadding)
 
         for (index, card) in cards.enumerated() {
             let row = index / columns
@@ -349,13 +354,19 @@ private final class WindowCardButton: NSButton {
 
     override func layout() {
         super.layout()
+        let iconOnly = bounds.width < 120 || bounds.height < 100
+        let compact = bounds.width < 160
         let titleHeight: CGFloat = 24
+        titleField.isHidden = iconOnly
+        previewView.isHidden = compact
+        placeholderIconView.isHidden = previewView.image != nil && !compact
         previewView.frame = CGRect(x: 0, y: titleHeight + 8, width: bounds.width, height: max(bounds.height - titleHeight - 8, 0))
+        let iconSide = min(iconOnly ? 52 : 64, max(min(bounds.width, bounds.height) - 16, 24))
         placeholderIconView.frame = CGRect(
-            x: previewView.frame.midX - 32,
-            y: previewView.frame.midY - 32,
-            width: 64,
-            height: 64
+            x: bounds.midX - iconSide / 2,
+            y: (iconOnly ? bounds.midY : previewView.frame.midY) - iconSide / 2,
+            width: iconSide,
+            height: iconSide
         )
         titleField.frame = CGRect(x: 2, y: 0, width: max(bounds.width - 4, 0), height: titleHeight)
     }
@@ -403,7 +414,7 @@ private final class WindowCardButton: NSButton {
         loader.request(managedWindow) { [weak self] image in
             guard let self, let image else { return }
             self.previewView.image = image
-            self.placeholderIconView.isHidden = true
+            self.placeholderIconView.isHidden = !self.previewView.isHidden
         }
     }
 
