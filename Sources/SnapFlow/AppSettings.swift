@@ -52,6 +52,20 @@ enum ShortcutAction: String, CaseIterable, Codable {
     var zone: SnapZone? { SnapZone(rawValue: rawValue) }
 }
 
+enum LinkedResizeDisplayMode: String, CaseIterable, Codable {
+    case lightweight
+    case mainOnly
+    case allWindows
+
+    var resizesMainWindowLive: Bool {
+        self != .lightweight
+    }
+
+    var resizesLinkedWindowsLive: Bool {
+        self == .allWindows
+    }
+}
+
 final class AppSettings {
     static let shared = AppSettings()
     static let didChangeNotification = Notification.Name("SnapFlowSettingsDidChange")
@@ -62,6 +76,7 @@ final class AppSettings {
     private let cornerBandKey = "snapCornerBand"
     private let restoreSizeOnMoveKey = "restoreSnappedWindowSizeOnMove"
     private let linkedResizeEnabledKey = "linkedResizeEnabled"
+    private let linkedResizeDisplayModeKey = "linkedResizeDisplayMode"
     private let sideDwellExpansionEnabledKey = "sideDwellExpansionEnabled"
     private let sideDwellDurationKey = "sideDwellDuration"
     private let windowPreviewsEnabledKey = "windowPreviewsEnabled"
@@ -136,6 +151,20 @@ final class AppSettings {
         }
         set {
             defaults.set(newValue, forKey: linkedResizeEnabledKey)
+            notify()
+        }
+    }
+
+    var linkedResizeDisplayMode: LinkedResizeDisplayMode {
+        get {
+            guard let rawValue = defaults.string(forKey: linkedResizeDisplayModeKey),
+                  let mode = LinkedResizeDisplayMode(rawValue: rawValue) else {
+                return .mainOnly
+            }
+            return mode
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: linkedResizeDisplayModeKey)
             notify()
         }
     }

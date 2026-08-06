@@ -282,4 +282,107 @@ final class SplitLayoutTests: XCTestCase {
             )
         )
     }
+
+    func testResizeHandleJoinsAFullHeightWindowToTwoQuarterWindows() {
+        let placements = [
+            SplitPlacementGeometry(
+                stableIdentity: "left",
+                zone: .leftHalf,
+                frame: CGRect(x: 0, y: 0, width: 720, height: 900)
+            ),
+            SplitPlacementGeometry(
+                stableIdentity: "top-right",
+                zone: .topRight,
+                frame: CGRect(x: 720, y: 450, width: 720, height: 450)
+            ),
+            SplitPlacementGeometry(
+                stableIdentity: "bottom-right",
+                zone: .bottomRight,
+                frame: CGRect(x: 720, y: 0, width: 720, height: 450)
+            )
+        ]
+        let handles = SplitLayoutGeometry.resizeHandleGeometries(
+            placements: placements
+        )
+        XCTAssertEqual(handles.count, 1)
+        XCTAssertEqual(handles.first?.axis, .horizontal)
+        XCTAssertEqual(handles.first?.coordinate, 720)
+        XCTAssertEqual(handles.first?.span, 0...900)
+        XCTAssertEqual(
+            handles.first?.participantIDs,
+            Set(["left", "top-right", "bottom-right"])
+        )
+    }
+
+    func testResizeHandleDoesNotJoinDetachedWindows() {
+        let placements = [
+            SplitPlacementGeometry(
+                stableIdentity: "left",
+                zone: .leftHalf,
+                frame: CGRect(x: 0, y: 0, width: 720, height: 900)
+            ),
+            SplitPlacementGeometry(
+                stableIdentity: "right",
+                zone: .rightHalf,
+                frame: CGRect(x: 720, y: 0, width: 720, height: 900)
+            )
+        ]
+        XCTAssertTrue(
+            SplitLayoutGeometry.resizeHandleGeometries(
+                placements: placements,
+                detachedConnections: [SplitConnectionKey("left", "right")]
+            ).isEmpty
+        )
+    }
+
+    func testAllowedBoundaryRangeProtectsBothSides() {
+        let participants = [
+            SplitResizeParticipantGeometry(
+                stableIdentity: "left",
+                frame: CGRect(x: 0, y: 0, width: 720, height: 900),
+                side: .nearOrigin,
+                minimumLength: 300
+            ),
+            SplitResizeParticipantGeometry(
+                stableIdentity: "right",
+                frame: CGRect(x: 720, y: 0, width: 720, height: 900),
+                side: .farOrigin,
+                minimumLength: 400
+            )
+        ]
+        XCTAssertEqual(
+            SplitLayoutGeometry.allowedBoundaryRange(
+                axis: .horizontal,
+                participants: participants,
+                screenFrame: screen
+            ),
+            300...1_040
+        )
+    }
+
+    func testHandleResizeUsesOneBoundaryForEveryParticipant() {
+        let participants = [
+            SplitResizeParticipantGeometry(
+                stableIdentity: "left",
+                frame: CGRect(x: 0, y: 0, width: 720, height: 900),
+                side: .nearOrigin,
+                minimumLength: 1
+            ),
+            SplitResizeParticipantGeometry(
+                stableIdentity: "right",
+                frame: CGRect(x: 720, y: 0, width: 720, height: 900),
+                side: .farOrigin,
+                minimumLength: 1
+            )
+        ]
+        let frames = SplitLayoutGeometry.resizedFrames(
+            meetingBoundary: 840,
+            axis: .horizontal,
+            participants: participants
+        )
+        XCTAssertEqual(frames["left"]?.maxX, 840)
+        XCTAssertEqual(frames["right"]?.minX, 840)
+        XCTAssertEqual(frames["left"]?.minX, screen.minX)
+        XCTAssertEqual(frames["right"]?.maxX, screen.maxX)
+    }
 }

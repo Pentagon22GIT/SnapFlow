@@ -210,6 +210,37 @@ final class AXWindowService {
         return firstPositionResult && sizeResult && finalPositionResult
     }
 
+    @discardableResult
+    func setFrameLightweight(
+        _ frame: CGRect,
+        primaryScreenTop: CGFloat,
+        for window: AXUIElement
+    ) -> Bool {
+        var position = CGPoint(
+            x: frame.minX,
+            y: primaryScreenTop - frame.minY - frame.height
+        )
+        var size = frame.size
+        guard let positionValue = AXValueCreate(.cgPoint, &position),
+              let sizeValue = AXValueCreate(.cgSize, &size) else { return false }
+        let firstPositionResult = AXUIElementSetAttributeValue(
+            window,
+            kAXPositionAttribute as CFString,
+            positionValue
+        ) == .success
+        let sizeResult = AXUIElementSetAttributeValue(
+            window,
+            kAXSizeAttribute as CFString,
+            sizeValue
+        ) == .success
+        let finalPositionResult = AXUIElementSetAttributeValue(
+            window,
+            kAXPositionAttribute as CFString,
+            positionValue
+        ) == .success
+        return firstPositionResult && sizeResult && finalPositionResult
+    }
+
     func setFrameReliably(
         _ targetFrame: CGRect,
         for window: AXUIElement,

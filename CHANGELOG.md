@@ -4,6 +4,35 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-06
+
+### Added
+
+- スナップ済みウィンドウの共有境界へ、縦・横方向のリサイズつまみを追加
+- ドラッグ中の表示を「軽量」「標準」「すべて表示」から選べる3段階設定を追加
+- 重いアプリへ古いリサイズ要求を蓄積せず、最新の目標フレームだけを送る連続リサイズ制御を追加
+- 左右・上下・四分割・三分割の共有線を一つのつまみとしてまとめる境界検出を追加
+
+### Changed
+
+- つまみと仮想ガイドを実ウィンドウの応答ではなくマウス座標へ直接追従する方式へ変更
+- MouseUp後の最終補正とキャンセル復元をブラー表示の裏で行い、確定時の急なフレーム変化を見せにくくする方式へ変更
+- 連動リサイズの正式な操作を共有境界のつまみに統一し、通常のウィンドウ境界操作はmacOS標準の単独リサイズとして扱うよう変更
+- 仮想表示を連動先だけでなくメインウィンドウにも適用できるよう拡張
+- 設定画面の名称と説明を短く、結果が分かる表現へ全面的に整理
+- 設定画面のdocument viewを上原点へ変更し、初回表示が最下部になる問題を修正
+
+### Security
+
+- 仮想表示対象をドラッグ中のAccessibilityリサイズ経路へ渡さない状態分離を追加
+- 連続リサイズ要求を一つの直列処理へ限定し、キャンセル世代より古い要求を破棄
+- 新しい画面キャプチャ、ネットワーク通信、権限を追加せずに実装
+
+### Fixed
+
+- 設定画面を最初に開いた際、最下部付近が表示される場合がある問題
+- 重いメインウィンドウの実フレーム取得遅延が、つまみと仮想ガイドの追従まで遅らせる問題
+
 ## [1.1.1] - 2026-08-05
 
 ### Fixed
@@ -67,7 +96,8 @@
 - GitHub Actions、CodeQL、Dependabot、テスト
 - Security Policy、Privacy Policy、Threat Model、Release手順、監査報告
 
-[Unreleased]: https://github.com/Pentagon22GIT/SnapFlow/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/Pentagon22GIT/SnapFlow/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/Pentagon22GIT/SnapFlow/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/Pentagon22GIT/SnapFlow/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/Pentagon22GIT/SnapFlow/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Pentagon22GIT/SnapFlow/releases/tag/v1.0.0

@@ -22,6 +22,18 @@ final class VirtualResizeOverlay {
         driverFrame: CGRect,
         screenFrame: CGRect
     ) {
+        update(
+            items: items,
+            liveFrames: [driverFrame],
+            screenFrame: screenFrame
+        )
+    }
+
+    func update(
+        items: [VirtualResizeItem],
+        liveFrames: [CGRect],
+        screenFrame: CGRect
+    ) {
         guard !items.isEmpty else {
             canvas?.hideContent()
             return
@@ -29,7 +41,7 @@ final class VirtualResizeOverlay {
         let canvas = canvas(for: screenFrame)
         canvas.update(
             items: items,
-            driverFrame: driverFrame,
+            liveFrames: liveFrames,
             screenFrame: screenFrame
         )
     }
@@ -95,7 +107,7 @@ private final class VirtualResizeCanvas {
 
     func update(
         items: [VirtualResizeItem],
-        driverFrame: CGRect,
+        liveFrames: [CGRect],
         screenFrame: CGRect
     ) {
         updateScreenFrame(screenFrame)
@@ -104,14 +116,14 @@ private final class VirtualResizeCanvas {
             follower.setHidden(true)
         }
 
-        let localDriver = localFrame(driverFrame, in: screenFrame)
+        let localLiveFrames = liveFrames.map { localFrame($0, in: screenFrame) }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         for item in items.sorted(by: { $0.stableIdentity < $1.stableIdentity }) {
             follower(for: item).update(
                 originalFrame: localFrame(item.originalFrame, in: screenFrame),
                 targetFrame: localFrame(item.targetFrame, in: screenFrame),
-                driverFrame: localDriver,
+                liveFrames: localLiveFrames,
                 appIcon: item.appIcon,
                 rootView: rootView
             )
@@ -208,7 +220,7 @@ private final class VirtualFollowerViews {
     func update(
         originalFrame: CGRect,
         targetFrame: CGRect,
-        driverFrame: CGRect,
+        liveFrames: [CGRect],
         appIcon: NSImage?,
         rootView: NSView
     ) {
@@ -220,16 +232,16 @@ private final class VirtualFollowerViews {
         targetView.isHidden = false
         concealView.frame = concealFrame
         targetView.frame = guideFrame
-        applyDriverCutout(
+        applyLiveCutouts(
             to: concealView,
             mask: concealMask,
-            driverFrame: driverFrame,
+            liveFrames: liveFrames,
             rootView: rootView
         )
-        applyDriverCutout(
+        applyLiveCutouts(
             to: targetView,
             mask: targetMask,
-            driverFrame: driverFrame,
+            liveFrames: liveFrames,
             rootView: rootView
         )
         layoutIcon(in: guideFrame)
@@ -268,23 +280,29 @@ private final class VirtualFollowerViews {
         effectView.layer?.masksToBounds = true
     }
 
-    private func applyDriverCutout(
+    private func applyLiveCutouts(
         to view: NSView,
         mask: CAShapeLayer,
-        driverFrame: CGRect,
+        liveFrames: [CGRect],
         rootView: NSView
     ) {
         guard let layer = view.layer else { return }
-        let driverInView = view.convert(driverFrame, from: rootView)
-        let overlap = view.bounds.intersection(driverInView)
-        guard !overlap.isNull, overlap.width > 0, overlap.height > 0 else {
+        let overlaps = liveFrames.compactMap { frame -> CGRect? in
+            let frameInView = view.convert(frame, from: rootView)
+            let overlap = view.bounds.intersection(frameInView)
+            guard !overlap.isNull, overlap.width > 0, overlap.height > 0 else {
+                return nil
+            }
+            return overlap
+        }
+        guard !overlaps.isEmpty else {
             layer.mask = nil
             return
         }
 
         let path = CGMutablePath()
         path.addRect(view.bounds)
-        path.addRect(overlap)
+        overlaps.forEach { path.addRect($0) }
         mask.frame = view.bounds
         mask.path = path
         mask.fillRule = .evenOdd
