@@ -51,6 +51,20 @@ struct WindowSnapshot {
     let wasFullscreen: Bool
 }
 
+struct WindowOcclusionSnapshot {
+    let windowID: CGWindowID
+    let pid: pid_t
+    let frame: CGRect
+    let zIndex: Int
+    let layer: Int
+}
+
+struct WindowOcclusionParticipant: Equatable {
+    let pid: pid_t
+    let frame: CGRect
+    let windowID: CGWindowID?
+}
+
 final class AXWindowService {
     private struct CGWindowRecord {
         let id: CGWindowID
@@ -178,6 +192,129 @@ final class AXWindowService {
 
     func visibleStableIdentities() -> Set<String> {
         Set(visibleWindows().map(\.stableIdentity))
+    }
+
+    func windowOcclusionSnapshot() -> [WindowOcclusionSnapshot] {
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        guard let info = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else { return [] }
+        return info.enumerated().compactMap { index, item in
+            guard let id = item[kCGWindowNumber as String] as? NSNumber,
+                  let pid = item[kCGWindowOwnerPID as String] as? NSNumber,
+                  pid.int32Value != currentPID,
+                  ((item[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1) > 0 else {
+                return nil
+            }
+            guard let boundsDictionary = item[kCGWindowBounds as String]
+                as? [String: Any] else { return nil }
+            guard let bounds = CGRect(
+                dictionaryRepresentation: boundsDictionary as CFDictionary
+            ), bounds.width > 0, bounds.height > 0 else { return nil }
+            return WindowOcclusionSnapshot(
+                windowID: CGWindowID(id.uint32Value),
+                pid: pid.int32Value,
+                frame: cgBoundsToCocoa(bounds).insetBy(dx: -1, dy: -1),
+                zIndex: index,
+                layer: (item[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
+            )
+        }
+    }
+
+    func occludingWindows(
+        above participants: [WindowOcclusionParticipant],
+        in snapshot: [WindowOcclusionSnapshot]
+    ) -> [WindowOcclusionSnapshot]? {
+        guard !participants.isEmpty else { return [] }
+        var participantWindowIDs = Set<CGWindowID>()
+        var availableWindowIDs = Set(snapshot.map(\.windowID))
+
+        for participant in participants {
+            if let windowID = participant.windowID,
+               availableWindowIDs.contains(windowID),
+               let directMatch = snapshot.first(where: {
+                   $0.windowID == windowID
+                       && $0.pid == participant.pid
+                       && $0.layer == 0
+                       && occlusionGeometryMatches(
+                           participantFrame: participant.frame,
+                           snapshotFrame: $0.frame
+                       )
+               }) {
+                participantWindowIDs.insert(directMatch.windowID)
+                availableWindowIDs.remove(directMatch.windowID)
+                continue
+            }
+
+            let candidates = snapshot.filter {
+                availableWindowIDs.contains($0.windowID)
+                    && $0.pid == participant.pid
+                    && $0.layer == 0
+                    && occlusionGeometryMatches(
+                        participantFrame: participant.frame,
+                        snapshotFrame: $0.frame
+                    )
+            }.sorted {
+                occlusionGeometryDistance(
+                    participantFrame: participant.frame,
+                    snapshotFrame: $0.frame
+                ) < occlusionGeometryDistance(
+                    participantFrame: participant.frame,
+                    snapshotFrame: $1.frame
+                )
+            }
+            guard let bestMatch = candidates.first else { return nil }
+            if candidates.count > 1 {
+                let firstDistance = occlusionGeometryDistance(
+                    participantFrame: participant.frame,
+                    snapshotFrame: bestMatch.frame
+                )
+                let secondDistance = occlusionGeometryDistance(
+                    participantFrame: participant.frame,
+                    snapshotFrame: candidates[1].frame
+                )
+                guard secondDistance - firstDistance > 1 else { return nil }
+            }
+            participantWindowIDs.insert(bestMatch.windowID)
+            availableWindowIDs.remove(bestMatch.windowID)
+        }
+
+        let participantIndices = snapshot.compactMap { item in
+            participantWindowIDs.contains(item.windowID) ? item.zIndex : nil
+        }
+        guard participantIndices.count == participants.count,
+              let rearmostParticipantIndex = participantIndices.max() else { return nil }
+        return snapshot.filter {
+            $0.zIndex < rearmostParticipantIndex
+                && !participantWindowIDs.contains($0.windowID)
+        }
+    }
+
+    private func occlusionGeometryMatches(
+        participantFrame: CGRect,
+        snapshotFrame: CGRect
+    ) -> Bool {
+        let sizeDelta = abs(snapshotFrame.width - participantFrame.width)
+            + abs(snapshotFrame.height - participantFrame.height)
+        let originDelta = abs(snapshotFrame.minX - participantFrame.minX)
+            + abs(snapshotFrame.minY - participantFrame.minY)
+        let referenceLength = max(
+            min(participantFrame.width, participantFrame.height),
+            1
+        )
+        return sizeDelta <= max(24, referenceLength * 0.08)
+            && originDelta <= max(48, referenceLength * 0.12)
+    }
+
+    private func occlusionGeometryDistance(
+        participantFrame: CGRect,
+        snapshotFrame: CGRect
+    ) -> CGFloat {
+        abs(snapshotFrame.width - participantFrame.width)
+            + abs(snapshotFrame.height - participantFrame.height)
+            + abs(snapshotFrame.minX - participantFrame.minX)
+            + abs(snapshotFrame.minY - participantFrame.minY)
     }
 
     func isWindowAlive(element: AXUIElement, pid: pid_t) -> Bool {

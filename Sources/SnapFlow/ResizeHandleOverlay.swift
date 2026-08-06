@@ -9,6 +9,30 @@ struct ResizeHandleDescriptor: Equatable {
     let span: ClosedRange<CGFloat>
     let screenFrame: CGRect
     let participantIDs: Set<String>
+    let occlusionParticipants: [WindowOcclusionParticipant]
+    let showsPill: Bool
+
+    init(
+        id: String,
+        displayID: CGDirectDisplayID,
+        axis: SplitAxis,
+        coordinate: CGFloat,
+        span: ClosedRange<CGFloat>,
+        screenFrame: CGRect,
+        participantIDs: Set<String>,
+        occlusionParticipants: [WindowOcclusionParticipant] = [],
+        showsPill: Bool = true
+    ) {
+        self.id = id
+        self.displayID = displayID
+        self.axis = axis
+        self.coordinate = coordinate
+        self.span = span
+        self.screenFrame = screenFrame
+        self.participantIDs = participantIDs
+        self.occlusionParticipants = occlusionParticipants
+        self.showsPill = showsPill
+    }
 
     func interactionFrame(thickness: CGFloat = 16) -> CGRect {
         let spanLength = max(span.upperBound - span.lowerBound, 1)
@@ -31,6 +55,25 @@ struct ResizeHandleDescriptor: Equatable {
     }
 }
 
+
+private struct ResizeHandlePresentationSignature: Equatable {
+    let id: String
+    let axis: SplitAxis
+    let coordinate: CGFloat
+    let lowerBound: CGFloat
+    let upperBound: CGFloat
+    let showsPill: Bool
+
+    init(_ descriptor: ResizeHandleDescriptor) {
+        id = descriptor.id
+        axis = descriptor.axis
+        coordinate = descriptor.coordinate
+        lowerBound = descriptor.span.lowerBound
+        upperBound = descriptor.span.upperBound
+        showsPill = descriptor.showsPill
+    }
+}
+
 private struct ResizeHandleJunctionDescriptor {
     let id: String
     let first: ResizeHandleDescriptor
@@ -48,8 +91,21 @@ final class ResizeHandleOverlay {
     private var junctionPanels: [String: ResizeHandleJunctionPanel] = [:]
     private var activeHandleID: String?
     private var activeJunctionID: String?
+    private var isInputSuspended = false
+    private var presentedSignatures: [ResizeHandlePresentationSignature] = []
+
+    var hasPresentedHandles: Bool {
+        !panels.isEmpty || !junctionPanels.isEmpty
+    }
 
     func update(_ descriptors: [ResizeHandleDescriptor]) {
+        let signatures = descriptors.map(ResizeHandlePresentationSignature.init)
+            .sorted { $0.id < $1.id }
+        if signatures == presentedSignatures {
+            return
+        }
+        presentedSignatures = signatures
+
         let visibleIDs = Set(descriptors.map(\.id))
         let staleIDs = panels.keys.filter {
             !visibleIDs.contains($0) && $0 != activeHandleID
@@ -62,6 +118,7 @@ final class ResizeHandleOverlay {
             let panel = panels[descriptor.id] ?? makePanel(for: descriptor)
             panels[descriptor.id] = panel
             panel.update(descriptor: descriptor)
+            panel.ignoresMouseEvents = isInputSuspended
             if activeHandleID == nil || activeHandleID == descriptor.id {
                 panel.orderFrontRegardless()
             } else {
@@ -81,6 +138,7 @@ final class ResizeHandleOverlay {
             let panel = junctionPanels[junction.id] ?? makeJunctionPanel(for: junction)
             junctionPanels[junction.id] = panel
             panel.update(descriptor: junction)
+            panel.ignoresMouseEvents = isInputSuspended
             if activeHandleID == nil || activeJunctionID == junction.id {
                 panel.orderFrontRegardless()
             } else {
@@ -111,16 +169,26 @@ final class ResizeHandleOverlay {
         panels.values.forEach {
             $0.setInteractionActive(false)
             $0.cancelInteraction()
+            $0.orderFrontRegardless()
         }
         junctionPanels.values.forEach {
             $0.setInteractionActive(false)
             $0.cancelInteraction()
+            $0.orderFrontRegardless()
         }
     }
 
+    func setInputSuspended(_ isSuspended: Bool) {
+        isInputSuspended = isSuspended
+        panels.values.forEach { $0.ignoresMouseEvents = isSuspended }
+        junctionPanels.values.forEach { $0.ignoresMouseEvents = isSuspended }
+    }
+
     func hideAll() {
+        presentedSignatures = []
         activeHandleID = nil
         activeJunctionID = nil
+        isInputSuspended = false
         panels.values.forEach {
             $0.cancelInteraction()
             $0.orderOut(nil)
@@ -272,6 +340,7 @@ private final class ResizeHandleView: NSView {
     var descriptor: ResizeHandleDescriptor {
         didSet {
             updatePillFrame()
+            updatePillVisibility()
             discardCursorRects()
         }
     }
@@ -302,6 +371,7 @@ private final class ResizeHandleView: NSView {
         pillLayer.shadowRadius = 3
         pillLayer.shadowOffset = CGSize(width: 0, height: -1)
         layer?.addSublayer(pillLayer)
+        updatePillVisibility()
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -424,11 +494,16 @@ private final class ResizeHandleView: NSView {
         CATransaction.begin()
         CATransaction.setAnimationDuration(0.10)
         guideLayer.opacity = isHovering || isDragging ? 1 : 0
+        updatePillVisibility()
         pillLayer.backgroundColor = isDragging
             ? NSColor.controlAccentColor.cgColor
             : NSColor.white.withAlphaComponent(isHovering ? 1 : 0.88).cgColor
         CATransaction.commit()
         updatePillFrame()
+    }
+
+    private func updatePillVisibility() {
+        pillLayer.opacity = descriptor.showsPill || isHovering || isDragging ? 1 : 0
     }
 }
 

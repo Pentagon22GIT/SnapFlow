@@ -2,8 +2,31 @@ import XCTest
 @testable import SnapFlow
 
 final class AppSettingsTests: XCTestCase {
+    func testRaiseConnectedWindowsOnClickIsEnabledByDefault() {
+        XCTAssertTrue(AppSettings.defaultRaiseConnectedWindowsOnClick)
+    }
+
     func testNativeResizeRecoveryIsOptIn() {
         XCTAssertFalse(AppSettings.defaultNativeResizeRecoveryEnabled)
+    }
+
+    func testNativeResizeRecoveryRequiresItsParentSetting() {
+        XCTAssertFalse(AppSettings.isNativeResizeRecoveryActive(
+            linkedResizeEnabled: false,
+            recoveryEnabled: false
+        ))
+        XCTAssertFalse(AppSettings.isNativeResizeRecoveryActive(
+            linkedResizeEnabled: false,
+            recoveryEnabled: true
+        ))
+        XCTAssertFalse(AppSettings.isNativeResizeRecoveryActive(
+            linkedResizeEnabled: true,
+            recoveryEnabled: false
+        ))
+        XCTAssertTrue(AppSettings.isNativeResizeRecoveryActive(
+            linkedResizeEnabled: true,
+            recoveryEnabled: true
+        ))
     }
 
     func testLightweightModeResizesNoWindowLive() {

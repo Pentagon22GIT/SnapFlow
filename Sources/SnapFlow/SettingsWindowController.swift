@@ -1,6 +1,7 @@
 import AppKit
 
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
+    var onVisibilityChange: ((Bool) -> Void)?
     private let settings = AppSettings.shared
     private let scrollView = NSScrollView()
     private var didPositionScrollView = false
@@ -9,6 +10,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var shortcutButtons: [ShortcutAction: NSButton] = [:]
     private var clearButtons: [ShortcutAction: NSButton] = [:]
     private var resizeModeButtons: [LinkedResizeDisplayMode: NSButton] = [:]
+    private let linkedResizeOptionsStack = NSStackView()
     private let launchCheckbox = NSButton(checkboxWithTitle: "ログイン時にSnapFlowを起動", target: nil, action: nil)
     private let windowPreviewsCheckbox = NSButton(
         checkboxWithTitle: "配置候補にウィンドウ画像を表示",
@@ -26,7 +28,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         action: nil
     )
     private let nativeResizeRecoveryCheckbox = NSButton(
-        checkboxWithTitle: "ドラッグ中なら分割へ戻せる",
+        checkboxWithTitle: "スナップがタブの最小サイズを侵害した時にスナップを保持する",
+        target: nil,
+        action: nil
+    )
+    private let raiseConnectedWindowsOnClickCheckbox = NSButton(
+        checkboxWithTitle: "スナップ中のウィンドウクリックによる最前面移動",
         target: nil,
         action: nil
     )
@@ -67,10 +74,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         finishRecording()
+        DispatchQueue.main.async { [weak self] in
+            self?.onVisibilityChange?(false)
+        }
+    }
+
+    func windowDidMiniaturize(_ notification: Notification) {
+        onVisibilityChange?(false)
+    }
+
+    func windowDidDeminiaturize(_ notification: Notification) {
+        onVisibilityChange?(true)
     }
 
     func show() {
         refresh()
+        onVisibilityChange?(true)
         showWindow(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
         positionScrollViewAtTopIfNeeded()
@@ -147,15 +166,42 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         linkedResizeNote.maximumNumberOfLines = 0
         stack.addArrangedSubview(linkedResizeNote)
 
+        linkedResizeOptionsStack.orientation = .vertical
+        linkedResizeOptionsStack.alignment = .leading
+        linkedResizeOptionsStack.spacing = 10
+        linkedResizeOptionsStack.edgeInsets = NSEdgeInsets(
+            top: 0,
+            left: 18,
+            bottom: 0,
+            right: 0
+        )
+
+        let linkedResizeAvailabilityNote = NSTextField(
+            wrappingLabelWithString: "以下の設定は、分割ウィンドウの連動リサイズがオンのときだけ使用されます。"
+        )
+        linkedResizeAvailabilityNote.textColor = .secondaryLabelColor
+        linkedResizeAvailabilityNote.font = .systemFont(ofSize: 11)
+        linkedResizeAvailabilityNote.maximumNumberOfLines = 0
+        linkedResizeOptionsStack.addArrangedSubview(linkedResizeAvailabilityNote)
+
+        raiseConnectedWindowsOnClickCheckbox.target = self
+        raiseConnectedWindowsOnClickCheckbox.action = #selector(toggleRaiseConnectedWindowsOnClick)
+        linkedResizeOptionsStack.addArrangedSubview(raiseConnectedWindowsOnClickCheckbox)
+        let raiseConnectedWindowsOnClickNote = NSTextField(
+            wrappingLabelWithString: "スナップに所属しているウィンドウをクリックした時に、接続されているウィンドウも一緒に最前面へ移動します。"
+        )
+        raiseConnectedWindowsOnClickNote.textColor = .secondaryLabelColor
+        raiseConnectedWindowsOnClickNote.maximumNumberOfLines = 0
+        linkedResizeOptionsStack.addArrangedSubview(raiseConnectedWindowsOnClickNote)
+
         let displayModeTitle = NSTextField(labelWithString: "ドラッグ中の表示")
         displayModeTitle.font = .systemFont(ofSize: 13, weight: .medium)
-        stack.addArrangedSubview(displayModeTitle)
+        linkedResizeOptionsStack.addArrangedSubview(displayModeTitle)
 
         let displayModeStack = NSStackView()
         displayModeStack.orientation = .vertical
         displayModeStack.alignment = .leading
         displayModeStack.spacing = 7
-        displayModeStack.edgeInsets = NSEdgeInsets(top: 0, left: 18, bottom: 0, right: 0)
         let modeDescriptions: [(LinkedResizeDisplayMode, String, String)] = [
             (.lightweight, "軽量", "すべてアイコンで表示"),
             (.mainOnly, "標準", "操作中のウィンドウだけ内容を表示"),
@@ -171,32 +217,48 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             resizeModeButtons[mode] = button
             displayModeStack.addArrangedSubview(button)
         }
-        stack.addArrangedSubview(displayModeStack)
+        linkedResizeOptionsStack.addArrangedSubview(displayModeStack)
         let displayModeNote = NSTextField(
             wrappingLabelWithString: "表示するウィンドウが多いほど、動作が重くなる場合があります。"
         )
         displayModeNote.textColor = .secondaryLabelColor
         displayModeNote.maximumNumberOfLines = 0
-        stack.addArrangedSubview(displayModeNote)
+        linkedResizeOptionsStack.addArrangedSubview(displayModeNote)
 
         nativeResizeRecoveryCheckbox.target = self
         nativeResizeRecoveryCheckbox.action = #selector(toggleNativeResizeRecovery)
-        stack.addArrangedSubview(nativeResizeRecoveryCheckbox)
+        linkedResizeOptionsStack.addArrangedSubview(nativeResizeRecoveryCheckbox)
         let recoveryNote = NSTextField(
-            wrappingLabelWithString: "境目を行き過ぎても、離す前に戻せば連動を続けます。"
+            wrappingLabelWithString: "最小の境目を過ぎても、ウィンドウサイズを戻していくと自動的に追従します"
         )
         recoveryNote.textColor = .secondaryLabelColor
         recoveryNote.maximumNumberOfLines = 0
-        stack.addArrangedSubview(recoveryNote)
+        linkedResizeOptionsStack.addArrangedSubview(recoveryNote)
+        let recoveryScopeNote = NSTextField(
+            wrappingLabelWithString: "スナップ済みウィンドウの共有境界を、ウィンドウ側から直接動かしたときに適用されます。"
+        )
+        recoveryScopeNote.textColor = .secondaryLabelColor
+        recoveryScopeNote.font = .systemFont(ofSize: 11)
+        recoveryScopeNote.maximumNumberOfLines = 0
+        linkedResizeOptionsStack.addArrangedSubview(recoveryScopeNote)
+        stack.addArrangedSubview(linkedResizeOptionsStack)
 
+        stack.addArrangedSubview(separator())
+        stack.addArrangedSubview(sectionTitle("最小サイズの判定"))
+        let intrusionScopeNote = NSTextField(
+            wrappingLabelWithString: "新しいスナップと分割ウィンドウのサイズ調整に共通で使用します。"
+        )
+        intrusionScopeNote.textColor = .secondaryLabelColor
+        intrusionScopeNote.maximumNumberOfLines = 0
+        stack.addArrangedSubview(intrusionScopeNote)
         configureSlider(
             layoutIntrusionSlider,
             range: AppSettings.layoutIntrusionToleranceRange,
             action: #selector(changeLayoutIntrusionTolerance(_:))
         )
         stack.addArrangedSubview(settingRow(
-            title: "レイアウトの縮小許容率",
-            detail: "大きくすると、より小さい領域への配置や連動を許可します。",
+            title: "スナップ保持の許容率",
+            detail: "配置領域がウィンドウの最小サイズをどの程度下回るまで、スナップを保持するか設定します。",
             slider: layoutIntrusionSlider,
             valueLabel: layoutIntrusionValue
         ))
@@ -344,6 +406,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         windowPreviewsCheckbox.state = settings.windowPreviewsEnabled ? .on : .off
         restoreSizeOnMoveCheckbox.state = settings.restoreSnappedWindowSizeOnMove ? .on : .off
         linkedResizeCheckbox.state = settings.linkedResizeEnabled ? .on : .off
+        raiseConnectedWindowsOnClickCheckbox.state = settings.raiseConnectedWindowsOnClick
+            ? .on
+            : .off
+        raiseConnectedWindowsOnClickCheckbox.isEnabled = settings.linkedResizeEnabled
         for (mode, button) in resizeModeButtons {
             button.state = settings.linkedResizeDisplayMode == mode ? .on : .off
             button.isEnabled = settings.linkedResizeEnabled
@@ -352,6 +418,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             ? .on
             : .off
         nativeResizeRecoveryCheckbox.isEnabled = settings.linkedResizeEnabled
+        linkedResizeOptionsStack.alphaValue = settings.linkedResizeEnabled
+            ? 1
+            : 0.45
         sideDwellExpansionCheckbox.state = settings.sideDwellExpansionEnabled ? .on : .off
         sideDwellDurationSlider.isEnabled = settings.sideDwellExpansionEnabled
         sideDwellDurationValue.textColor = settings.sideDwellExpansionEnabled ? .labelColor : .tertiaryLabelColor
@@ -433,6 +502,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func toggleNativeResizeRecovery() {
         settings.nativeResizeRecoveryEnabled = nativeResizeRecoveryCheckbox.state == .on
+        refresh()
+    }
+
+    @objc private func toggleRaiseConnectedWindowsOnClick() {
+        settings.raiseConnectedWindowsOnClick = raiseConnectedWindowsOnClickCheckbox.state == .on
         refresh()
     }
 

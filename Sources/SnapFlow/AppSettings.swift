@@ -78,6 +78,7 @@ final class AppSettings {
     private let linkedResizeEnabledKey = "linkedResizeEnabled"
     private let linkedResizeDisplayModeKey = "linkedResizeDisplayMode"
     private let nativeResizeRecoveryEnabledKey = "nativeResizeRecoveryEnabled"
+    private let raiseConnectedWindowsOnClickKey = "raiseConnectedWindowsOnClick"
     private let sideDwellExpansionEnabledKey = "sideDwellExpansionEnabled"
     private let sideDwellDurationKey = "sideDwellDuration"
     private let windowPreviewsEnabledKey = "windowPreviewsEnabled"
@@ -89,6 +90,7 @@ final class AppSettings {
     static let defaultSideDwellDuration: Double = 2
     static let defaultLayoutIntrusionTolerance: Double = 0.5
     static let defaultNativeResizeRecoveryEnabled = false
+    static let defaultRaiseConnectedWindowsOnClick = true
     static let edgeThresholdRange: ClosedRange<Double> = 8...80
     static let cornerBandRange: ClosedRange<Double> = 60...300
     static let sideDwellDurationRange: ClosedRange<Double> = 0.5...5
@@ -182,6 +184,33 @@ final class AppSettings {
             defaults.set(newValue, forKey: nativeResizeRecoveryEnabledKey)
             notify()
         }
+    }
+
+    var raiseConnectedWindowsOnClick: Bool {
+        get {
+            guard defaults.object(forKey: raiseConnectedWindowsOnClickKey) != nil else {
+                return Self.defaultRaiseConnectedWindowsOnClick
+            }
+            return defaults.bool(forKey: raiseConnectedWindowsOnClickKey)
+        }
+        set {
+            defaults.set(newValue, forKey: raiseConnectedWindowsOnClickKey)
+            notify()
+        }
+    }
+
+    var nativeResizeRecoveryIsActive: Bool {
+        Self.isNativeResizeRecoveryActive(
+            linkedResizeEnabled: linkedResizeEnabled,
+            recoveryEnabled: nativeResizeRecoveryEnabled
+        )
+    }
+
+    static func isNativeResizeRecoveryActive(
+        linkedResizeEnabled: Bool,
+        recoveryEnabled: Bool
+    ) -> Bool {
+        linkedResizeEnabled && recoveryEnabled
     }
 
     var sideDwellExpansionEnabled: Bool {

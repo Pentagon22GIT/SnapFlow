@@ -6,7 +6,13 @@ final class SnapFlowApp: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let controller = SnapController()
     private let shortcutManager = GlobalShortcutManager()
-    private lazy var settingsWindow = SettingsWindowController()
+    private lazy var settingsWindow: SettingsWindowController = {
+        let controller = SettingsWindowController()
+        controller.onVisibilityChange = { [weak self] isVisible in
+            self?.controller.setApplicationUIVisible(isVisible)
+        }
+        return controller
+    }()
     private var settingsObserver: NSObjectProtocol?
 
     static func main() {
