@@ -121,6 +121,28 @@ enum SplitLayoutGeometry {
     static let contactTolerance: CGFloat = 8
     static let ratioHysteresis: CGFloat = 0.05
 
+    static func resizeAxis(
+        forDragDelta delta: CGPoint,
+        minimumDistance: CGFloat = 4
+    ) -> SplitAxis? {
+        guard hypot(delta.x, delta.y) >= minimumDistance else { return nil }
+        return abs(delta.x) >= abs(delta.y) ? .horizontal : .vertical
+    }
+
+    static func remainsSuspended(
+        wasSuspended: Bool,
+        compressionRatios: [CGFloat],
+        tolerance: CGFloat
+    ) -> Bool {
+        guard tolerance.isFinite,
+              compressionRatios.allSatisfy({ $0.isFinite }) else { return true }
+        if wasSuspended {
+            let resumeTolerance = max(tolerance - ratioHysteresis, 0)
+            return !compressionRatios.allSatisfy { $0 <= resumeTolerance }
+        }
+        return compressionRatios.contains { $0 > tolerance }
+    }
+
     static func resizeHandleGeometries(
         placements: [SplitPlacementGeometry],
         detachedConnections: Set<SplitConnectionKey> = [],

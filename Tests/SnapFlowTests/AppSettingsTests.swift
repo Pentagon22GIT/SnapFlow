@@ -2,6 +2,10 @@ import XCTest
 @testable import SnapFlow
 
 final class AppSettingsTests: XCTestCase {
+    func testNativeResizeRecoveryIsOptIn() {
+        XCTAssertFalse(AppSettings.defaultNativeResizeRecoveryEnabled)
+    }
+
     func testLightweightModeResizesNoWindowLive() {
         XCTAssertFalse(LinkedResizeDisplayMode.lightweight.resizesMainWindowLive)
         XCTAssertFalse(LinkedResizeDisplayMode.lightweight.resizesLinkedWindowsLive)

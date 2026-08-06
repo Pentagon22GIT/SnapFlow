@@ -9,6 +9,33 @@ struct ResizeHandleDescriptor: Equatable {
     let span: ClosedRange<CGFloat>
     let screenFrame: CGRect
     let participantIDs: Set<String>
+
+    func interactionFrame(thickness: CGFloat = 16) -> CGRect {
+        let spanLength = max(span.upperBound - span.lowerBound, 1)
+        switch axis {
+        case .horizontal:
+            return CGRect(
+                x: coordinate - thickness / 2,
+                y: span.lowerBound,
+                width: thickness,
+                height: spanLength
+            )
+        case .vertical:
+            return CGRect(
+                x: span.lowerBound,
+                y: coordinate - thickness / 2,
+                width: spanLength,
+                height: thickness
+            )
+        }
+    }
+}
+
+private struct ResizeHandleJunctionDescriptor {
+    let id: String
+    let first: ResizeHandleDescriptor
+    let second: ResizeHandleDescriptor
+    let frame: CGRect
 }
 
 final class ResizeHandleOverlay {
@@ -18,7 +45,9 @@ final class ResizeHandleOverlay {
     var onCancel: ((ResizeHandleDescriptor) -> Void)?
 
     private var panels: [String: ResizeHandlePanel] = [:]
+    private var junctionPanels: [String: ResizeHandleJunctionPanel] = [:]
     private var activeHandleID: String?
+    private var activeJunctionID: String?
 
     func update(_ descriptors: [ResizeHandleDescriptor]) {
         let visibleIDs = Set(descriptors.map(\.id))
@@ -39,6 +68,25 @@ final class ResizeHandleOverlay {
                 panel.orderOut(nil)
             }
         }
+
+        let junctions = makeJunctions(from: descriptors)
+        let visibleJunctionIDs = Set(junctions.map(\.id))
+        let staleJunctionIDs = junctionPanels.keys.filter {
+            !visibleJunctionIDs.contains($0) && $0 != activeJunctionID
+        }
+        for id in staleJunctionIDs {
+            junctionPanels.removeValue(forKey: id)?.orderOut(nil)
+        }
+        for junction in junctions {
+            let panel = junctionPanels[junction.id] ?? makeJunctionPanel(for: junction)
+            junctionPanels[junction.id] = panel
+            panel.update(descriptor: junction)
+            if activeHandleID == nil || activeJunctionID == junction.id {
+                panel.orderFrontRegardless()
+            } else {
+                panel.orderOut(nil)
+            }
+        }
     }
 
     func beginInteraction(with handleID: String) {
@@ -49,11 +97,22 @@ final class ResizeHandleOverlay {
                 panel.orderOut(nil)
             }
         }
+        for (id, panel) in junctionPanels {
+            panel.setInteractionActive(id == activeJunctionID)
+            if id != activeJunctionID {
+                panel.orderOut(nil)
+            }
+        }
     }
 
     func endInteraction() {
         activeHandleID = nil
+        activeJunctionID = nil
         panels.values.forEach {
+            $0.setInteractionActive(false)
+            $0.cancelInteraction()
+        }
+        junctionPanels.values.forEach {
             $0.setInteractionActive(false)
             $0.cancelInteraction()
         }
@@ -61,16 +120,23 @@ final class ResizeHandleOverlay {
 
     func hideAll() {
         activeHandleID = nil
+        activeJunctionID = nil
         panels.values.forEach {
             $0.cancelInteraction()
             $0.orderOut(nil)
         }
         panels.removeAll()
+        junctionPanels.values.forEach {
+            $0.cancelInteraction()
+            $0.orderOut(nil)
+        }
+        junctionPanels.removeAll()
     }
 
     func owns(window: NSWindow?) -> Bool {
         guard let window else { return false }
         return panels.values.contains { $0 === window }
+            || junctionPanels.values.contains { $0 === window }
     }
 
     private func makePanel(for descriptor: ResizeHandleDescriptor) -> ResizeHandlePanel {
@@ -88,6 +154,69 @@ final class ResizeHandleOverlay {
             self?.onCancel?(descriptor)
         }
         return panel
+    }
+
+    private func makeJunctionPanel(
+        for descriptor: ResizeHandleJunctionDescriptor
+    ) -> ResizeHandleJunctionPanel {
+        let panel = ResizeHandleJunctionPanel(descriptor: descriptor)
+        panel.junctionView.onBegin = { [weak self] junctionID, selected, point in
+            guard let self else { return }
+            self.activeJunctionID = junctionID
+            self.onBegin?(selected, point)
+            if self.activeHandleID == nil {
+                self.activeJunctionID = nil
+            }
+        }
+        panel.junctionView.onChange = { [weak self] selected, point in
+            self?.onChange?(selected, point)
+        }
+        panel.junctionView.onEnd = { [weak self] selected, point in
+            self?.onEnd?(selected, point)
+        }
+        panel.junctionView.onCancel = { [weak self] selected in
+            self?.onCancel?(selected)
+        }
+        return panel
+    }
+
+    private func makeJunctions(
+        from descriptors: [ResizeHandleDescriptor]
+    ) -> [ResizeHandleJunctionDescriptor] {
+        let xBoundaries = descriptors.filter { $0.axis == .horizontal }
+        let yBoundaries = descriptors.filter { $0.axis == .vertical }
+        let radius: CGFloat = 12
+        var result: [ResizeHandleJunctionDescriptor] = []
+
+        for xBoundary in xBoundaries {
+            for yBoundary in yBoundaries where
+                yBoundary.displayID == xBoundary.displayID {
+                let point = CGPoint(
+                    x: xBoundary.coordinate,
+                    y: yBoundary.coordinate
+                )
+                guard xBoundary.span.contains(point.y),
+                      yBoundary.span.contains(point.x) else { continue }
+                let minX = max(point.x - radius, yBoundary.span.lowerBound)
+                let maxX = min(point.x + radius, yBoundary.span.upperBound)
+                let minY = max(point.y - radius, xBoundary.span.lowerBound)
+                let maxY = min(point.y + radius, xBoundary.span.upperBound)
+                guard maxX - minX >= 8, maxY - minY >= 8 else { continue }
+                let ids = [xBoundary.id, yBoundary.id].sorted()
+                result.append(ResizeHandleJunctionDescriptor(
+                    id: ids.joined(separator: "::"),
+                    first: xBoundary,
+                    second: yBoundary,
+                    frame: CGRect(
+                        x: minX,
+                        y: minY,
+                        width: maxX - minX,
+                        height: maxY - minY
+                    )
+                ))
+            }
+        }
+        return result
     }
 }
 
@@ -135,26 +264,7 @@ private final class ResizeHandlePanel: NSPanel {
     }
 
     private static func panelFrame(for descriptor: ResizeHandleDescriptor) -> CGRect {
-        let spanLength = max(descriptor.span.upperBound - descriptor.span.lowerBound, 1)
-        let longSide = min(max(spanLength - 8, 36), 64)
-        let hitThickness: CGFloat = 24
-        let center = (descriptor.span.lowerBound + descriptor.span.upperBound) / 2
-        switch descriptor.axis {
-        case .horizontal:
-            return CGRect(
-                x: descriptor.coordinate - hitThickness / 2,
-                y: center - longSide / 2,
-                width: hitThickness,
-                height: longSide
-            )
-        case .vertical:
-            return CGRect(
-                x: center - longSide / 2,
-                y: descriptor.coordinate - hitThickness / 2,
-                width: longSide,
-                height: hitThickness
-            )
-        }
+        descriptor.interactionFrame()
     }
 }
 
@@ -170,6 +280,7 @@ private final class ResizeHandleView: NSView {
     var onEnd: ((ResizeHandleDescriptor, CGPoint) -> Void)?
     var onCancel: ((ResizeHandleDescriptor) -> Void)?
 
+    private let guideLayer = CALayer()
     private let pillLayer = CALayer()
     private var trackingArea: NSTrackingArea?
     private var isHovering = false
@@ -180,6 +291,9 @@ private final class ResizeHandleView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
+        guideLayer.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.32).cgColor
+        guideLayer.opacity = 0
+        layer?.addSublayer(guideLayer)
         pillLayer.backgroundColor = NSColor.white.withAlphaComponent(0.88).cgColor
         pillLayer.borderColor = NSColor.black.withAlphaComponent(0.28).cgColor
         pillLayer.borderWidth = 0.5
@@ -271,9 +385,16 @@ private final class ResizeHandleView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         let thickness: CGFloat = isHovering || isDragging ? 7 : 5
-        let length: CGFloat = isHovering || isDragging ? 42 : 36
+        let requestedLength: CGFloat = isHovering || isDragging ? 42 : 36
         switch descriptor.axis {
         case .horizontal:
+            let length = min(requestedLength, max(bounds.height - 4, 1))
+            guideLayer.frame = CGRect(
+                x: bounds.midX - 1,
+                y: 0,
+                width: 2,
+                height: bounds.height
+            )
             pillLayer.frame = CGRect(
                 x: bounds.midX - thickness / 2,
                 y: bounds.midY - length / 2,
@@ -281,6 +402,13 @@ private final class ResizeHandleView: NSView {
                 height: length
             )
         case .vertical:
+            let length = min(requestedLength, max(bounds.width - 4, 1))
+            guideLayer.frame = CGRect(
+                x: 0,
+                y: bounds.midY - 1,
+                width: bounds.width,
+                height: 2
+            )
             pillLayer.frame = CGRect(
                 x: bounds.midX - length / 2,
                 y: bounds.midY - thickness / 2,
@@ -295,10 +423,132 @@ private final class ResizeHandleView: NSView {
     private func updatePillAppearance() {
         CATransaction.begin()
         CATransaction.setAnimationDuration(0.10)
+        guideLayer.opacity = isHovering || isDragging ? 1 : 0
         pillLayer.backgroundColor = isDragging
             ? NSColor.controlAccentColor.cgColor
             : NSColor.white.withAlphaComponent(isHovering ? 1 : 0.88).cgColor
         CATransaction.commit()
         updatePillFrame()
+    }
+}
+
+private final class ResizeHandleJunctionPanel: NSPanel {
+    let junctionView: ResizeHandleJunctionView
+
+    init(descriptor: ResizeHandleJunctionDescriptor) {
+        junctionView = ResizeHandleJunctionView(descriptor: descriptor)
+        super.init(
+            contentRect: descriptor.frame,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = false
+        ignoresMouseEvents = false
+        collectionBehavior = [
+            .moveToActiveSpace,
+            .fullScreenAuxiliary,
+            .stationary,
+            .ignoresCycle
+        ]
+        contentView = junctionView
+    }
+
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
+    func update(descriptor: ResizeHandleJunctionDescriptor) {
+        junctionView.descriptor = descriptor
+        setFrame(descriptor.frame, display: true)
+    }
+
+    func setInteractionActive(_ isActive: Bool) {
+        level = isActive
+            ? NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 2)
+            : NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
+    }
+
+    func cancelInteraction() {
+        junctionView.cancelInteraction()
+    }
+}
+
+private final class ResizeHandleJunctionView: NSView {
+    var descriptor: ResizeHandleJunctionDescriptor
+    var onBegin: ((String, ResizeHandleDescriptor, CGPoint) -> Void)?
+    var onChange: ((ResizeHandleDescriptor, CGPoint) -> Void)?
+    var onEnd: ((ResizeHandleDescriptor, CGPoint) -> Void)?
+    var onCancel: ((ResizeHandleDescriptor) -> Void)?
+
+    private var startPoint: CGPoint?
+    private var selectedDescriptor: ResizeHandleDescriptor?
+    private let directionThreshold: CGFloat = 4
+
+    init(descriptor: ResizeHandleJunctionDescriptor) {
+        self.descriptor = descriptor
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: NSCursor.crosshair)
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        guard event.type == .leftMouseDown else { return }
+        startPoint = NSEvent.mouseLocation
+        selectedDescriptor = nil
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let startPoint else { return }
+        let point = NSEvent.mouseLocation
+        if selectedDescriptor == nil {
+            let deltaX = point.x - startPoint.x
+            let deltaY = point.y - startPoint.y
+            guard let desiredAxis = SplitLayoutGeometry.resizeAxis(
+                forDragDelta: CGPoint(x: deltaX, y: deltaY),
+                minimumDistance: directionThreshold
+            ) else { return }
+            let selected = descriptor.first.axis == desiredAxis
+                ? descriptor.first
+                : descriptor.second
+            selectedDescriptor = selected
+            onBegin?(descriptor.id, selected, point)
+            return
+        }
+        if let selectedDescriptor {
+            onChange?(selectedDescriptor, point)
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer { resetInteraction() }
+        guard let selectedDescriptor else { return }
+        onEnd?(selectedDescriptor, NSEvent.mouseLocation)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        guard event.keyCode == 53, let selectedDescriptor else {
+            super.keyDown(with: event)
+            return
+        }
+        onCancel?(selectedDescriptor)
+        resetInteraction()
+    }
+
+    func cancelInteraction() {
+        resetInteraction()
+    }
+
+    private func resetInteraction() {
+        startPoint = nil
+        selectedDescriptor = nil
     }
 }

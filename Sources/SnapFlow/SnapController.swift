@@ -200,7 +200,6 @@ final class SnapController {
     private var lastManualResizeRefreshAt: TimeInterval = 0
     private let manualResizeRefreshInterval: TimeInterval = 1.0 / 60.0
     private let manualResizeDetectionTolerance: CGFloat = 0.5
-    private let legacyDirectLinkedResizeEnabled = false
     private var sideDwellTimer: Timer?
     private var sideDwellPulseTimer: Timer?
     private var sideDwellContext: SideDwellContext?
@@ -781,7 +780,7 @@ final class SnapController {
         guard handleResizeSession?.handleID == descriptor.id else { return }
         updateHandleResize(descriptor: descriptor, at: point)
         guard let session = handleResizeSession else { return }
-        showHandleSettlementOverlay(session, restoreOriginalFrames: false)
+        updateHandleSettlementOverlay(session, restoreOriginalFrames: false)
         handleResizeSession = nil
         isHandleResizeFinalizing = true
         finalizingHandleResizeSession = session
@@ -890,7 +889,7 @@ final class SnapController {
             resizeHandleOverlay.endInteraction()
             return
         }
-        showHandleSettlementOverlay(
+        updateHandleSettlementOverlay(
             session,
             restoreOriginalFrames: restoreOriginalFrames
         )
@@ -917,11 +916,19 @@ final class SnapController {
         }
     }
 
-    private func showHandleSettlementOverlay(
+    private func updateHandleSettlementOverlay(
         _ session: HandleResizeSession,
         restoreOriginalFrames: Bool
     ) {
-        let items = session.participants.map { identity, participant in
+        guard !session.virtualIdentities.isEmpty else {
+            virtualResizeOverlay.hideAll()
+            return
+        }
+        let items = session.virtualIdentities.compactMap { identity
+            -> VirtualResizeItem? in
+            guard let participant = session.participants[identity] else {
+                return nil
+            }
             let displayedTarget = restoreOriginalFrames
                 ? participant.originalFrame
                 : participant.targetFrame
@@ -934,7 +941,9 @@ final class SnapController {
         }
         virtualResizeOverlay.update(
             items: items,
-            liveFrames: [],
+            liveFrames: session.liveIdentities.compactMap {
+                session.participants[$0]?.targetFrame
+            },
             screenFrame: session.screenFrame
         )
     }
@@ -1044,7 +1053,7 @@ final class SnapController {
     }
 
     private func prepareManualResizeIfNeeded(at point: CGPoint, driver: ManagedWindow) {
-        guard legacyDirectLinkedResizeEnabled,
+        guard settings.nativeResizeRecoveryEnabled,
               settings.linkedResizeEnabled,
               pendingDragStartedNearResizeEdge,
               let placement = lockedPlacements[driver.stableIdentity] else { return }
@@ -1137,7 +1146,7 @@ final class SnapController {
         guard sizeChanged else { return false }
 
         manualResizeWindow = currentWindow
-        if legacyDirectLinkedResizeEnabled,
+        if settings.nativeResizeRecoveryEnabled,
            settings.linkedResizeEnabled,
            manualResizeSession == nil {
             manualResizeSession = makeManualResizeSession(
@@ -1200,8 +1209,9 @@ final class SnapController {
             return false
         }
 
-        guard legacyDirectLinkedResizeEnabled,
-              settings.linkedResizeEnabled else {
+        guard settings.nativeResizeRecoveryEnabled,
+              settings.linkedResizeEnabled,
+              manualResizeSession != nil else {
             releaseManualResizeProtection(
                 driverIdentity: currentWindow.stableIdentity,
                 session: manualResizeSession
@@ -1533,13 +1543,11 @@ final class SnapController {
                     referenceLength: referenceLength
                 )
             }
-            if participant.isSuspended {
-                participant.isSuspended = !compressionDegrees.allSatisfy {
-                    $0 <= max(tolerance - SplitLayoutGeometry.ratioHysteresis, 0)
-                }
-            } else {
-                participant.isSuspended = compressionDegrees.contains { $0 > tolerance }
-            }
+            participant.isSuspended = SplitLayoutGeometry.remainsSuspended(
+                wasSuspended: participant.isSuspended,
+                compressionRatios: compressionDegrees,
+                tolerance: tolerance
+            )
 
             if !participant.isSuspended {
                 overlayItems.append(VirtualResizeItem(
@@ -3204,7 +3212,7 @@ final class SnapController {
         handleResizeSession = nil
         finalizingHandleResizeSession = nil
         if let invalidatedHandleSession {
-            showHandleSettlementOverlay(
+            updateHandleSettlementOverlay(
                 invalidatedHandleSession,
                 restoreOriginalFrames: true
             )

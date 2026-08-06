@@ -25,6 +25,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         target: nil,
         action: nil
     )
+    private let nativeResizeRecoveryCheckbox = NSButton(
+        checkboxWithTitle: "ドラッグ中なら分割へ戻せる",
+        target: nil,
+        action: nil
+    )
     private let edgeThresholdSlider = NSSlider()
     private let edgeThresholdValue = NSTextField(labelWithString: "")
     private let cornerBandSlider = NSSlider()
@@ -174,14 +179,24 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         displayModeNote.maximumNumberOfLines = 0
         stack.addArrangedSubview(displayModeNote)
 
+        nativeResizeRecoveryCheckbox.target = self
+        nativeResizeRecoveryCheckbox.action = #selector(toggleNativeResizeRecovery)
+        stack.addArrangedSubview(nativeResizeRecoveryCheckbox)
+        let recoveryNote = NSTextField(
+            wrappingLabelWithString: "境目を行き過ぎても、離す前に戻せば連動を続けます。"
+        )
+        recoveryNote.textColor = .secondaryLabelColor
+        recoveryNote.maximumNumberOfLines = 0
+        stack.addArrangedSubview(recoveryNote)
+
         configureSlider(
             layoutIntrusionSlider,
             range: AppSettings.layoutIntrusionToleranceRange,
             action: #selector(changeLayoutIntrusionTolerance(_:))
         )
         stack.addArrangedSubview(settingRow(
-            title: "ウィンドウを小さくする範囲",
-            detail: "小さくすると、ウィンドウを大きめに保ちます。",
+            title: "レイアウトの縮小許容率",
+            detail: "大きくすると、より小さい領域への配置や連動を許可します。",
             slider: layoutIntrusionSlider,
             valueLabel: layoutIntrusionValue
         ))
@@ -333,6 +348,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             button.state = settings.linkedResizeDisplayMode == mode ? .on : .off
             button.isEnabled = settings.linkedResizeEnabled
         }
+        nativeResizeRecoveryCheckbox.state = settings.nativeResizeRecoveryEnabled
+            ? .on
+            : .off
+        nativeResizeRecoveryCheckbox.isEnabled = settings.linkedResizeEnabled
         sideDwellExpansionCheckbox.state = settings.sideDwellExpansionEnabled ? .on : .off
         sideDwellDurationSlider.isEnabled = settings.sideDwellExpansionEnabled
         sideDwellDurationValue.textColor = settings.sideDwellExpansionEnabled ? .labelColor : .tertiaryLabelColor
@@ -409,6 +428,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func toggleLinkedResize() {
         settings.linkedResizeEnabled = linkedResizeCheckbox.state == .on
+        refresh()
+    }
+
+    @objc private func toggleNativeResizeRecovery() {
+        settings.nativeResizeRecoveryEnabled = nativeResizeRecoveryCheckbox.state == .on
         refresh()
     }
 

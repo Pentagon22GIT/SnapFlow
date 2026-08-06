@@ -304,13 +304,117 @@ final class SplitLayoutTests: XCTestCase {
         let handles = SplitLayoutGeometry.resizeHandleGeometries(
             placements: placements
         )
-        XCTAssertEqual(handles.count, 1)
-        XCTAssertEqual(handles.first?.axis, .horizontal)
-        XCTAssertEqual(handles.first?.coordinate, 720)
-        XCTAssertEqual(handles.first?.span, 0...900)
+        XCTAssertEqual(handles.count, 2)
+        let verticalBoundary = handles.first { $0.axis == .horizontal }
+        XCTAssertEqual(verticalBoundary?.coordinate, 720)
+        XCTAssertEqual(verticalBoundary?.span, 0...900)
         XCTAssertEqual(
-            handles.first?.participantIDs,
+            verticalBoundary?.participantIDs,
             Set(["left", "top-right", "bottom-right"])
+        )
+        let rightHorizontalBoundary = handles.first { $0.axis == .vertical }
+        XCTAssertEqual(rightHorizontalBoundary?.coordinate, 450)
+        XCTAssertEqual(rightHorizontalBoundary?.span, 720...1_440)
+        XCTAssertEqual(
+            rightHorizontalBoundary?.participantIDs,
+            Set(["top-right", "bottom-right"])
+        )
+    }
+
+    func testFourQuartersMergeBothBoundariesAcrossTheFullSharedSpan() {
+        let placements = [
+            SplitPlacementGeometry(
+                stableIdentity: "top-left",
+                zone: .topLeft,
+                frame: CGRect(x: 0, y: 450, width: 720, height: 450)
+            ),
+            SplitPlacementGeometry(
+                stableIdentity: "top-right",
+                zone: .topRight,
+                frame: CGRect(x: 720, y: 450, width: 720, height: 450)
+            ),
+            SplitPlacementGeometry(
+                stableIdentity: "bottom-left",
+                zone: .bottomLeft,
+                frame: CGRect(x: 0, y: 0, width: 720, height: 450)
+            ),
+            SplitPlacementGeometry(
+                stableIdentity: "bottom-right",
+                zone: .bottomRight,
+                frame: CGRect(x: 720, y: 0, width: 720, height: 450)
+            )
+        ]
+        let handles = SplitLayoutGeometry.resizeHandleGeometries(
+            placements: placements
+        )
+        XCTAssertEqual(handles.count, 2)
+        let verticalBoundary = handles.first { $0.axis == .horizontal }
+        XCTAssertEqual(verticalBoundary?.coordinate, 720)
+        XCTAssertEqual(verticalBoundary?.span, 0...900)
+        XCTAssertEqual(verticalBoundary?.participantIDs.count, 4)
+        let horizontalBoundary = handles.first { $0.axis == .vertical }
+        XCTAssertEqual(horizontalBoundary?.coordinate, 450)
+        XCTAssertEqual(horizontalBoundary?.span, 0...1_440)
+        XCTAssertEqual(horizontalBoundary?.participantIDs.count, 4)
+    }
+
+    func testJunctionWaitsForIntentAndLocksToTheDominantDragAxis() {
+        XCTAssertNil(
+            SplitLayoutGeometry.resizeAxis(
+                forDragDelta: CGPoint(x: 2, y: 1)
+            )
+        )
+        XCTAssertEqual(
+            SplitLayoutGeometry.resizeAxis(
+                forDragDelta: CGPoint(x: 8, y: 3)
+            ),
+            .horizontal
+        )
+        XCTAssertEqual(
+            SplitLayoutGeometry.resizeAxis(
+                forDragDelta: CGPoint(x: 3, y: -8)
+            ),
+            .vertical
+        )
+    }
+
+    func testHandleInteractionFrameUsesTheEntireSharedSpan() {
+        let descriptor = ResizeHandleDescriptor(
+            id: "vertical-divider",
+            displayID: 1,
+            axis: .horizontal,
+            coordinate: 720,
+            span: 0...900,
+            screenFrame: screen,
+            participantIDs: ["left", "right"]
+        )
+        XCTAssertEqual(
+            descriptor.interactionFrame(),
+            CGRect(x: 712, y: 0, width: 16, height: 900)
+        )
+    }
+
+    func testRecoverableResizeUsesHysteresisBeforeReconnecting() {
+        XCTAssertTrue(
+            SplitLayoutGeometry.remainsSuspended(
+                wasSuspended: false,
+                compressionRatios: [0.51],
+                tolerance: 0.5
+            )
+        )
+        XCTAssertTrue(
+            SplitLayoutGeometry.remainsSuspended(
+                wasSuspended: true,
+                compressionRatios: [0.47],
+                tolerance: 0.5
+            )
+        )
+        XCTAssertFalse(
+            SplitLayoutGeometry.remainsSuspended(
+                wasSuspended: true,
+                compressionRatios: [0.44],
+                tolerance: 0.5
+            )
         )
     }
 

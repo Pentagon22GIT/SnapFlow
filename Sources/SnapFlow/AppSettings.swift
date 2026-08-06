@@ -77,6 +77,7 @@ final class AppSettings {
     private let restoreSizeOnMoveKey = "restoreSnappedWindowSizeOnMove"
     private let linkedResizeEnabledKey = "linkedResizeEnabled"
     private let linkedResizeDisplayModeKey = "linkedResizeDisplayMode"
+    private let nativeResizeRecoveryEnabledKey = "nativeResizeRecoveryEnabled"
     private let sideDwellExpansionEnabledKey = "sideDwellExpansionEnabled"
     private let sideDwellDurationKey = "sideDwellDuration"
     private let windowPreviewsEnabledKey = "windowPreviewsEnabled"
@@ -87,6 +88,7 @@ final class AppSettings {
     static let defaultCornerBand: Double = 120
     static let defaultSideDwellDuration: Double = 2
     static let defaultLayoutIntrusionTolerance: Double = 0.5
+    static let defaultNativeResizeRecoveryEnabled = false
     static let edgeThresholdRange: ClosedRange<Double> = 8...80
     static let cornerBandRange: ClosedRange<Double> = 60...300
     static let sideDwellDurationRange: ClosedRange<Double> = 0.5...5
@@ -165,6 +167,19 @@ final class AppSettings {
         }
         set {
             defaults.set(newValue.rawValue, forKey: linkedResizeDisplayModeKey)
+            notify()
+        }
+    }
+
+    var nativeResizeRecoveryEnabled: Bool {
+        get {
+            guard defaults.object(forKey: nativeResizeRecoveryEnabledKey) != nil else {
+                return Self.defaultNativeResizeRecoveryEnabled
+            }
+            return defaults.bool(forKey: nativeResizeRecoveryEnabledKey)
+        }
+        set {
+            defaults.set(newValue, forKey: nativeResizeRecoveryEnabledKey)
             notify()
         }
     }
