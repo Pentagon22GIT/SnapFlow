@@ -946,4 +946,236 @@ final class SplitLayoutTests: XCTestCase {
             orderedWindows: windows
         ))
     }
+
+    func testRecoverySceneSignatureIgnoresNonWindowLayers() {
+        let windows = [
+            WindowOcclusionSnapshot(
+                windowID: 10,
+                pid: 100,
+                frame: CGRect(x: 0, y: 0, width: 500, height: 900),
+                zIndex: 0,
+                layer: 0
+            ),
+            WindowOcclusionSnapshot(
+                windowID: 11,
+                pid: 101,
+                frame: CGRect(x: 500, y: 0, width: 500, height: 900),
+                zIndex: 1,
+                layer: 0
+            )
+        ]
+        let withMenu = [
+            WindowOcclusionSnapshot(
+                windowID: 99,
+                pid: 200,
+                frame: CGRect(x: 20, y: 20, width: 100, height: 40),
+                zIndex: 0,
+                layer: 24
+            )
+        ] + windows
+
+        XCTAssertEqual(
+            SplitLayoutGeometry.recoverySceneSignature(for: windows),
+            SplitLayoutGeometry.recoverySceneSignature(for: withMenu)
+        )
+    }
+
+    func testRecoverySceneSignatureChangesForWindowOrderOrGeometry() {
+        let first = WindowOcclusionSnapshot(
+            windowID: 10,
+            pid: 100,
+            frame: CGRect(x: 0, y: 0, width: 500, height: 900),
+            zIndex: 0,
+            layer: 0
+        )
+        let second = WindowOcclusionSnapshot(
+            windowID: 11,
+            pid: 101,
+            frame: CGRect(x: 500, y: 0, width: 500, height: 900),
+            zIndex: 1,
+            layer: 0
+        )
+        let movedSecond = WindowOcclusionSnapshot(
+            windowID: 11,
+            pid: 101,
+            frame: CGRect(x: 520, y: 0, width: 480, height: 900),
+            zIndex: 1,
+            layer: 0
+        )
+        let originalSignature = SplitLayoutGeometry.recoverySceneSignature(
+            for: [first, second]
+        )
+
+        XCTAssertNotEqual(
+            originalSignature,
+            SplitLayoutGeometry.recoverySceneSignature(for: [second, first])
+        )
+        XCTAssertNotEqual(
+            originalSignature,
+            SplitLayoutGeometry.recoverySceneSignature(
+                for: [first, movedSecond]
+            )
+        )
+    }
+
+    func testFocusedWindowPollEstablishesBaselineWithoutTriggering() {
+        var state = FocusedWindowPollState()
+        let first = ActiveWindowIdentitySnapshot(
+            pid: 100,
+            focusedIdentity: "ax:100:first",
+            mainIdentity: "ax:100:first"
+        )
+
+        XCTAssertNil(state.observe(first))
+        XCTAssertTrue(state.hasBaseline)
+        XCTAssertEqual(state.lastSnapshot, first)
+        XCTAssertNil(state.observe(first))
+    }
+
+    func testFocusedWindowPollPrefersAChangedMainWindow() {
+        var state = FocusedWindowPollState()
+        let first = ActiveWindowIdentitySnapshot(
+            pid: 100,
+            focusedIdentity: "ax:100:focused",
+            mainIdentity: "ax:100:first-main"
+        )
+        let second = ActiveWindowIdentitySnapshot(
+            pid: 100,
+            focusedIdentity: "ax:100:focused",
+            mainIdentity: "ax:100:second-main"
+        )
+        let expected = FocusedWindowIdentity(
+            pid: 100,
+            stableIdentity: "ax:100:second-main"
+        )
+
+        XCTAssertNil(state.observe(first))
+        XCTAssertEqual(state.observe(second), expected)
+        XCTAssertNil(state.observe(second))
+    }
+
+    func testFocusedWindowPollUsesFocusedChangeWhenMainIsStable() {
+        var state = FocusedWindowPollState()
+        let first = ActiveWindowIdentitySnapshot(
+            pid: 100,
+            focusedIdentity: "ax:100:first-focused",
+            mainIdentity: "ax:100:main"
+        )
+        let second = ActiveWindowIdentitySnapshot(
+            pid: 100,
+            focusedIdentity: "ax:100:second-focused",
+            mainIdentity: "ax:100:main"
+        )
+
+        XCTAssertNil(state.observe(first))
+        XCTAssertEqual(
+            state.observe(second),
+            FocusedWindowIdentity(
+                pid: 100,
+                stableIdentity: "ax:100:second-focused"
+            )
+        )
+    }
+
+    func testFocusedWindowPollRecoversAfterTemporaryNil() {
+        var state = FocusedWindowPollState()
+        let window = ActiveWindowIdentitySnapshot(
+            pid: 100,
+            focusedIdentity: "ax:100:focused",
+            mainIdentity: "ax:100:main"
+        )
+        let expected = FocusedWindowIdentity(
+            pid: 100,
+            stableIdentity: "ax:100:main"
+        )
+
+        XCTAssertNil(state.observe(window))
+        XCTAssertNil(state.observe(nil))
+        XCTAssertEqual(state.observe(window), expected)
+        state.reset()
+        XCTAssertFalse(state.hasBaseline)
+        XCTAssertNil(state.lastSnapshot)
+        XCTAssertNil(state.observe(window))
+    }
+
+    func testFocusedWindowSettlementRequiresConsecutiveIdentitySamples() {
+        let first = FocusedWindowSettlementState.nextObservationCount(
+            previousIdentity: nil,
+            currentIdentity: "window-a",
+            previousCount: 0
+        )
+        let second = FocusedWindowSettlementState.nextObservationCount(
+            previousIdentity: "window-a",
+            currentIdentity: "window-a",
+            previousCount: first
+        )
+        let third = FocusedWindowSettlementState.nextObservationCount(
+            previousIdentity: "window-a",
+            currentIdentity: "window-a",
+            previousCount: second
+        )
+
+        XCTAssertEqual(first, 1)
+        XCTAssertEqual(second, 2)
+        XCTAssertEqual(third, 3)
+    }
+
+    func testFocusedWindowSettlementResetsWhenCandidateChangesOrDisappears() {
+        XCTAssertEqual(
+            FocusedWindowSettlementState.nextObservationCount(
+                previousIdentity: "window-a",
+                currentIdentity: "window-b",
+                previousCount: 2
+            ),
+            1
+        )
+        XCTAssertEqual(
+            FocusedWindowSettlementState.nextObservationCount(
+                previousIdentity: "window-a",
+                currentIdentity: nil,
+                previousCount: 2
+            ),
+            0
+        )
+    }
+
+    func testWindowServerSelectionPollEstablishesBaselineWithoutTriggering() {
+        var state = WindowServerSelectionPollState()
+        let selection = WindowServerSelectionSnapshot(
+            pid: 100,
+            windowID: 42
+        )
+
+        XCTAssertNil(state.observe(selection))
+        XCTAssertEqual(state.lastSnapshot, selection)
+        XCTAssertNil(state.observe(selection))
+    }
+
+    func testWindowServerSelectionPollReportsExactWindowChange() {
+        var state = WindowServerSelectionPollState()
+        let first = WindowServerSelectionSnapshot(pid: 100, windowID: 42)
+        let second = WindowServerSelectionSnapshot(pid: 100, windowID: 43)
+
+        XCTAssertNil(state.observe(first))
+        XCTAssertEqual(state.observe(second), second)
+        XCTAssertNil(state.observe(second))
+    }
+
+    func testWindowServerSelectionPollReportsApplicationChange() {
+        var state = WindowServerSelectionPollState()
+        let first = WindowServerSelectionSnapshot(pid: 100, windowID: 42)
+        let second = WindowServerSelectionSnapshot(pid: 200, windowID: 84)
+
+        XCTAssertNil(state.observe(first))
+        XCTAssertEqual(state.observe(second), second)
+    }
+
+    func testWindowServerSelectionPollRecoversAfterMissionControlGap() {
+        var state = WindowServerSelectionPollState()
+        let selection = WindowServerSelectionSnapshot(pid: 100, windowID: 42)
+
+        XCTAssertNil(state.observe(selection))
+        XCTAssertNil(state.observe(nil))
+        XCTAssertEqual(state.observe(selection), selection)
+    }
 }

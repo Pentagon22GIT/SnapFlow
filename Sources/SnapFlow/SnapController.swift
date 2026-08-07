@@ -139,6 +139,11 @@ private enum SideSnapEdge: Equatable {
     case right
 }
 
+private enum ConnectedGroupRaiseOrigin: Equatable {
+    case pointer
+    case focus
+}
+
 private struct SideDwellContext: Equatable {
     let displayID: CGDirectDisplayID
     let edge: SideSnapEdge
@@ -157,9 +162,15 @@ final class SnapController {
                 cancelHandleResize(restoreOriginalFrames: true)
                 resetDragState()
                 activeSession = nil
+                activeWindowObserver.stop()
+                focusedWindowPollState.reset()
+                windowServerSelectionPollState.reset()
             } else if oldValue != isEnabled {
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.isEnabled else { return }
+                    self.focusedWindowPollState.reset()
+                    self.windowServerSelectionPollState.reset()
+                    self.activeWindowObserver.observeFrontmostApplication()
                     self.refreshResizeHandles()
                 }
             }
@@ -171,6 +182,7 @@ final class SnapController {
     private let picker = WindowPickerPanel()
     private let virtualResizeOverlay = VirtualResizeOverlay()
     private let resizeHandleOverlay = ResizeHandleOverlay()
+    private let activeWindowObserver = ActiveWindowObserver()
     private lazy var liveResizeScheduler = LiveResizeScheduler(windowService: windowService)
     private let settings = AppSettings.shared
     private var globalMonitor: Any?
@@ -179,6 +191,10 @@ final class SnapController {
     private var workspaceObservers: [NSObjectProtocol] = []
     private var defaultObservers: [NSObjectProtocol] = []
     private var recoveryTimer: Timer?
+    private var focusedWindowPollTimer: Timer?
+    private var focusedWindowPollState = FocusedWindowPollState()
+    private var windowServerSelectionPollState = WindowServerSelectionPollState()
+    private let focusedWindowPollInterval: TimeInterval = 0.10
     private var lastInteractionAt = Date()
     private let assistTimeout: TimeInterval = 30
     private var activeTarget: SnapTarget?
@@ -238,13 +254,31 @@ final class SnapController {
     private let maximumImmediateHandleOcclusionFailures = 6
     private var groupRaiseGeneration = 0
     private var pendingGroupRaiseWorkItem: DispatchWorkItem?
-    private let groupRaiseSettleDelay: TimeInterval = 0.03
+    private let groupRaiseSettleDelay: TimeInterval = 0.05
     private let groupRaiseVerificationDelay: TimeInterval = 0.06
     private let maximumGroupRaiseAttempts = 2
+    private let maximumPlainClickResolutionAttempts = 2
+    private let focusedWindowSettleDelay: TimeInterval = 0.05
+    private let focusedWindowConfirmationDelay: TimeInterval = 0.05
+    private let maximumFocusedWindowSettleAttempts = 12
+    private let requiredFocusedWindowStableObservations = 3
+    private var pendingFocusedGroupRaiseIdentity: String?
+    private var deferredFocusedWindowSignalPID: pid_t?
+    private var deferredFocusedWindowIdentity: String?
+    private var deferredPlainClickPoint: CGPoint?
+    private var selectionRaiseGeneration = 0
+    private var pendingSelectionRaiseWorkItem: DispatchWorkItem?
+    private let selectionSettleInterval: TimeInterval = 0.06
+    private let requiredSelectionStableObservations = 3
+    private let maximumSelectionSettleAttempts = 16
+    private var lastRecoverySceneSignature: [RecoveryWindowSceneItem]?
     private var shouldRestoreHandlesAfterPointerInteraction = false
     private var isApplicationUIVisible = false
 
     init() {
+        activeWindowObserver.onFocusedWindowChange = { [weak self] pid in
+            self?.scheduleSelectionDrivenGroupRaise(expectedPID: pid)
+        }
         resizeHandleOverlay.onBegin = { [weak self] descriptor, point in
             self?.beginHandleResize(descriptor: descriptor, at: point)
         }
@@ -264,6 +298,8 @@ final class SnapController {
         installEventMonitors()
         installRecoveryObservers()
         startRecoveryTimer()
+        startFocusedWindowPolling()
+        activeWindowObserver.observeFrontmostApplication()
         refreshResizeHandles()
     }
 
@@ -278,6 +314,12 @@ final class SnapController {
         defaultObservers.removeAll()
         recoveryTimer?.invalidate()
         recoveryTimer = nil
+        focusedWindowPollTimer?.invalidate()
+        focusedWindowPollTimer = nil
+        focusedWindowPollState.reset()
+        windowServerSelectionPollState.reset()
+        activeWindowObserver.stop()
+        invalidatePendingSelectionRaise()
         invalidatePendingOperations()
         overlay.hide()
         picker.hide()
@@ -388,6 +430,7 @@ final class SnapController {
         isApplicationUIVisible = isVisible
         if isVisible {
             invalidatePendingGroupRaise()
+            invalidatePendingSelectionRaise()
             if handleResizeSession != nil {
                 cancelHandleResize(restoreOriginalFrames: true)
             } else {
@@ -477,8 +520,15 @@ final class SnapController {
             forName: NSWorkspace.didActivateApplicationNotification,
             object: NSWorkspace.shared,
             queue: .main
-        ) { [weak self] _ in
-            self?.refreshResizeHandleOcclusion(force: true)
+        ) { [weak self] notification in
+            guard let self else { return }
+            let application = notification.userInfo?[
+                NSWorkspace.applicationUserInfoKey
+            ] as? NSRunningApplication
+            self.activeWindowObserver.observe(application)
+            self.scheduleSelectionDrivenGroupRaise(
+                expectedPID: application?.processIdentifier
+            )
         })
 
         defaultObservers.append(defaultCenter.addObserver(
@@ -504,6 +554,223 @@ final class SnapController {
         })
     }
 
+    private func startFocusedWindowPolling() {
+        focusedWindowPollTimer?.invalidate()
+        focusedWindowPollState.reset()
+        windowServerSelectionPollState.reset()
+        pollFocusedWindowIdentity()
+        focusedWindowPollTimer = Timer.scheduledTimer(
+            withTimeInterval: focusedWindowPollInterval,
+            repeats: true
+        ) { [weak self] _ in
+            self?.pollFocusedWindowIdentity()
+        }
+        if let focusedWindowPollTimer {
+            RunLoop.main.add(focusedWindowPollTimer, forMode: .common)
+        }
+    }
+
+    private func pollFocusedWindowIdentity() {
+        guard isEnabled,
+              settings.linkedResizeEnabled,
+              settings.raiseConnectedWindowsOnClick,
+              lockedPlacements.count >= 2,
+              !isApplicationUIVisible,
+              handleResizeSession == nil,
+              !isHandleResizeFinalizing,
+              dragWindow == nil,
+              manualResizeWindow == nil,
+              !isWindowMoveConfirmed,
+              activeSession == nil,
+              !isAssistPlacementPending else {
+            focusedWindowPollState.reset()
+            windowServerSelectionPollState.reset()
+            return
+        }
+
+        let currentSelection = windowService.windowServerSelectionSnapshot()
+        guard let changedSelection = windowServerSelectionPollState.observe(
+            currentSelection
+        ) else { return }
+        activeWindowObserver.observeFrontmostApplication()
+        scheduleSelectionDrivenGroupRaise(
+            expectedPID: changedSelection.pid,
+            initialSelection: changedSelection
+        )
+    }
+
+    private func scheduleSelectionDrivenGroupRaise(
+        expectedPID: pid_t?,
+        initialSelection: WindowServerSelectionSnapshot? = nil
+    ) {
+        guard selectionDrivenRaiseIsAllowed else { return }
+        selectionRaiseGeneration &+= 1
+        pendingSelectionRaiseWorkItem?.cancel()
+        pendingSelectionRaiseWorkItem = nil
+        scheduleSelectionSettlement(
+            expectedPID: expectedPID,
+            candidate: initialSelection,
+            stableObservationCount: initialSelection == nil ? 0 : 1,
+            completedAttempts: 0,
+            generation: selectionRaiseGeneration,
+            delay: selectionSettleInterval
+        )
+    }
+
+    private var selectionDrivenRaiseIsAllowed: Bool {
+        isEnabled
+            && settings.linkedResizeEnabled
+            && settings.raiseConnectedWindowsOnClick
+            && lockedPlacements.count >= 2
+            && !isApplicationUIVisible
+            && handleResizeSession == nil
+            && !isHandleResizeFinalizing
+            && dragWindow == nil
+            && manualResizeWindow == nil
+            && !isWindowMoveConfirmed
+            && activeSession == nil
+            && !isAssistPlacementPending
+    }
+
+    private func scheduleSelectionSettlement(
+        expectedPID: pid_t?,
+        candidate: WindowServerSelectionSnapshot?,
+        stableObservationCount: Int,
+        completedAttempts: Int,
+        generation: Int,
+        delay: TimeInterval
+    ) {
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.selectionRaiseGeneration == generation else { return }
+            self.pendingSelectionRaiseWorkItem = nil
+            self.settleWindowServerSelection(
+                expectedPID: expectedPID,
+                candidate: candidate,
+                stableObservationCount: stableObservationCount,
+                completedAttempts: completedAttempts,
+                generation: generation
+            )
+        }
+        pendingSelectionRaiseWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + delay,
+            execute: workItem
+        )
+    }
+
+    private func settleWindowServerSelection(
+        expectedPID: pid_t?,
+        candidate: WindowServerSelectionSnapshot?,
+        stableObservationCount: Int,
+        completedAttempts: Int,
+        generation: Int
+    ) {
+        guard selectionRaiseGeneration == generation,
+              selectionDrivenRaiseIsAllowed else { return }
+
+        let current = windowService.windowServerSelectionSnapshot()
+        let matchesExpectedPID = expectedPID == nil || current?.pid == expectedPID
+        let nextCandidate = matchesExpectedPID ? current : nil
+        let nextStableCount: Int
+        if let nextCandidate, nextCandidate == candidate {
+            nextStableCount = stableObservationCount + 1
+        } else if nextCandidate != nil {
+            nextStableCount = 1
+        } else {
+            nextStableCount = 0
+        }
+
+        if let nextCandidate,
+           nextStableCount >= requiredSelectionStableObservations {
+            let visibleWindows = windowService.visibleWindows()
+            if let selectedWindow = visibleWindows.first(where: {
+                $0.pid == nextCandidate.pid
+                    && $0.cgWindowID == nextCandidate.windowID
+            }) {
+                raiseConnectedGroupForSettledSelection(
+                    selectedWindow,
+                    selectedWindowID: nextCandidate.windowID,
+                    visibleWindows: visibleWindows,
+                    generation: generation,
+                    completedAttempts: 0
+                )
+                return
+            }
+        }
+
+        guard completedAttempts < maximumSelectionSettleAttempts else { return }
+        scheduleSelectionSettlement(
+            expectedPID: expectedPID,
+            candidate: nextCandidate,
+            stableObservationCount: nextStableCount,
+            completedAttempts: completedAttempts + 1,
+            generation: generation,
+            delay: selectionSettleInterval
+        )
+    }
+
+    private func raiseConnectedGroupForSettledSelection(
+        _ selectedWindow: ManagedWindow,
+        selectedWindowID: CGWindowID,
+        visibleWindows: [ManagedWindow],
+        generation: Int,
+        completedAttempts: Int
+    ) {
+        guard selectionRaiseGeneration == generation,
+              selectionDrivenRaiseIsAllowed,
+              let currentSelection = windowService.windowServerSelectionSnapshot(),
+              currentSelection.pid == selectedWindow.pid,
+              currentSelection.windowID == selectedWindowID,
+              let groupWindows = connectedSnapGroupWindows(
+                  for: selectedWindow,
+                  visibleWindows: visibleWindows
+              ) else { return }
+
+        if connectedGroupIsAlreadyFrontmost(
+            groupWindows,
+            within: visibleWindows
+        ) {
+            refreshResizeHandles(using: visibleWindows)
+            return
+        }
+
+        guard completedAttempts < maximumGroupRaiseAttempts else {
+            refreshResizeHandles(using: visibleWindows)
+            return
+        }
+        _ = raiseWindows(groupWindows, withMainWindow: selectedWindow)
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.selectionRaiseGeneration == generation else { return }
+            self.pendingSelectionRaiseWorkItem = nil
+            let updatedWindows = self.windowService.visibleWindows()
+            guard let updatedSelected = updatedWindows.first(where: {
+                $0.pid == selectedWindow.pid
+                    && $0.cgWindowID == selectedWindowID
+            }) else { return }
+            self.raiseConnectedGroupForSettledSelection(
+                updatedSelected,
+                selectedWindowID: selectedWindowID,
+                visibleWindows: updatedWindows,
+                generation: generation,
+                completedAttempts: completedAttempts + 1
+            )
+        }
+        pendingSelectionRaiseWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + groupRaiseVerificationDelay,
+            execute: workItem
+        )
+    }
+
+    private func invalidatePendingSelectionRaise() {
+        selectionRaiseGeneration &+= 1
+        pendingSelectionRaiseWorkItem?.cancel()
+        pendingSelectionRaiseWorkItem = nil
+    }
+
     private func startRecoveryTimer() {
         recoveryTimer?.invalidate()
         recoveryTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -516,13 +783,26 @@ final class SnapController {
 
     private func recoverIfNeeded() {
         guard isEnabled else { return }
+        activeWindowObserver.observeFrontmostApplication()
 
         if handleResizeSession == nil,
            pendingDragWindow == nil,
            dragWindow == nil,
            manualResizeWindow == nil,
            !isWindowMoveConfirmed {
-            refreshResizeHandles()
+            let snapshot = windowService.windowOcclusionSnapshot()
+            let signature = SplitLayoutGeometry.recoverySceneSignature(
+                for: snapshot
+            )
+            if signature != lastRecoverySceneSignature
+                || consecutiveHandleOcclusionFailures > 0 {
+                lastRecoverySceneSignature = signature
+                refreshResizeHandles(deferOcclusionRefresh: true)
+                refreshResizeHandleOcclusion(
+                    force: true,
+                    using: snapshot
+                )
+            }
         }
 
         if (dragWindow != nil || pendingDragWindow != nil),
@@ -650,6 +930,9 @@ final class SnapController {
 
         let snapshot = providedSnapshot
             ?? windowService.windowOcclusionSnapshot()
+        lastRecoverySceneSignature = SplitLayoutGeometry.recoverySceneSignature(
+            for: snapshot
+        )
         var visibleDescriptors: [ResizeHandleDescriptor] = []
         for descriptor in baseResizeHandleDescriptors {
             guard let occludingFrames = verifiedOccludingFrames(
@@ -1180,7 +1463,6 @@ final class SnapController {
         switch event.type {
         case .leftMouseDown:
             let point = NSEvent.mouseLocation
-            invalidatePendingGroupRaise()
 
             if picker.isVisible && picker.containsScreenPoint(point) {
                 return
@@ -2094,6 +2376,8 @@ final class SnapController {
         }
         guard allowImmediate || detachedCandidateHitCount >= 2 else { return false }
 
+        invalidatePendingGroupRaise()
+        invalidatePendingSelectionRaise()
         dragRestoreFrameCandidate = restoreFrames[source.stableIdentity] ?? source.frame
         releaseManualResizeProtection(
             driverIdentity: source.stableIdentity,
@@ -2169,6 +2453,8 @@ final class SnapController {
         at mousePoint: CGPoint,
         windowActuallyMoved: Bool
     ) {
+        invalidatePendingGroupRaise()
+        invalidatePendingSelectionRaise()
         releaseManualResizeProtection(
             driverIdentity: window.stableIdentity,
             session: manualResizeSession
@@ -2889,21 +3175,16 @@ final class SnapController {
         at point: CGPoint,
         visibleWindows: [ManagedWindow]
     ) -> ManagedWindow? {
-        if let pendingDragWindow,
-           let current = visibleWindows.first(where: {
-               $0.stableIdentity == pendingDragWindow.stableIdentity
-           }),
-           current.frame.contains(point),
-           windowService.canMoveAndResize(current) {
-            return current
-        }
+        // `pendingDragWindow` is captured at mouse-down, before macOS has
+        // necessarily promoted the clicked window. Using it here can select
+        // the previously focused window when two windows overlap. The Window
+        // Server ordered list after mouse-up is the authoritative click target.
         return visibleWindows.first {
             $0.frame.contains(point) && windowService.canMoveAndResize($0)
         }
     }
 
     private func scheduleConnectedGroupRaiseForPlainClick(at point: CGPoint) {
-        invalidatePendingGroupRaise()
         guard isEnabled,
               settings.linkedResizeEnabled,
               settings.raiseConnectedWindowsOnClick,
@@ -2913,19 +3194,220 @@ final class SnapController {
               activeSession == nil,
               !isAssistPlacementPending else { return }
 
+        // Mission Control and trackpad window selection also arrive through
+        // the global mouse monitor. If the selection has already started a
+        // focus-based cycle, keep the pointer path only as a fallback. Starting
+        // a new pointer generation here would cancel the very selection signal
+        // that should bring the connected group forward.
+        if pendingGroupRaiseWorkItem != nil
+            || pendingFocusedGroupRaiseIdentity != nil {
+            deferredPlainClickPoint = point
+            return
+        }
+
+        invalidatePendingGroupRaise()
         groupRaiseGeneration &+= 1
         scheduleConnectedGroupRaiseEvaluation(
             at: point,
             clickedIdentity: nil,
+            requiredFocusedIdentity: nil,
+            origin: .pointer,
+            refreshHandlesWhenSettled: false,
+            resolutionAttempts: 0,
             completedAttempts: 0,
             generation: groupRaiseGeneration,
             delay: groupRaiseSettleDelay
         )
     }
 
+    private func handleFocusedWindowChangeSignal(
+        from pid: pid_t,
+        preferredIdentity: String? = nil
+    ) {
+        guard isEnabled else { return }
+        if pendingGroupRaiseWorkItem != nil
+            || pendingFocusedGroupRaiseIdentity != nil {
+            deferredFocusedWindowSignalPID = pid
+            if let preferredIdentity {
+                deferredFocusedWindowIdentity = preferredIdentity
+            }
+            return
+        }
+        scheduleConnectedGroupRaiseForFocusedWindow(
+            expectedPID: pid,
+            preferredIdentity: preferredIdentity
+        )
+    }
+
+    private func scheduleConnectedGroupRaiseForFocusedWindow(
+        expectedPID: pid_t?,
+        preferredIdentity: String? = nil
+    ) {
+        invalidatePendingGroupRaise()
+        guard isEnabled,
+              settings.linkedResizeEnabled,
+              !isApplicationUIVisible,
+              handleResizeSession == nil,
+              !isHandleResizeFinalizing,
+              activeSession == nil,
+              !isAssistPlacementPending else { return }
+
+        groupRaiseGeneration &+= 1
+        scheduleFocusedWindowSettlement(
+            expectedPID: expectedPID,
+            preferredIdentity: preferredIdentity,
+            sampledIdentity: nil,
+            stableObservationCount: 0,
+            completedAttempts: 0,
+            generation: groupRaiseGeneration,
+            delay: focusedWindowSettleDelay
+        )
+    }
+
+    private func scheduleFocusedWindowSettlement(
+        expectedPID: pid_t?,
+        preferredIdentity: String?,
+        sampledIdentity: String?,
+        stableObservationCount: Int,
+        completedAttempts: Int,
+        generation: Int,
+        delay: TimeInterval
+    ) {
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.groupRaiseGeneration == generation else { return }
+            self.pendingGroupRaiseWorkItem = nil
+            self.settleFocusedWindow(
+                expectedPID: expectedPID,
+                preferredIdentity: preferredIdentity,
+                sampledIdentity: sampledIdentity,
+                stableObservationCount: stableObservationCount,
+                completedAttempts: completedAttempts,
+                generation: generation
+            )
+        }
+        pendingGroupRaiseWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + delay,
+            execute: workItem
+        )
+    }
+
+    private func settleFocusedWindow(
+        expectedPID: pid_t?,
+        preferredIdentity: String?,
+        sampledIdentity: String?,
+        stableObservationCount: Int,
+        completedAttempts: Int,
+        generation: Int
+    ) {
+        guard groupRaiseGeneration == generation else { return }
+        guard isEnabled,
+              settings.linkedResizeEnabled,
+              !isApplicationUIVisible,
+              handleResizeSession == nil,
+              !isHandleResizeFinalizing,
+              activeSession == nil,
+              !isAssistPlacementPending else {
+            finishConnectedGroupRaiseCycle(
+                visibleWindows: nil,
+                selectedIdentity: nil,
+                origin: .focus,
+                refreshHandles: false
+            )
+            return
+        }
+
+        guard let activeSnapshot = windowService.activeWindowIdentitySnapshot(),
+              expectedPID == nil || activeSnapshot.pid == expectedPID else {
+            guard completedAttempts < maximumFocusedWindowSettleAttempts else {
+                finishConnectedGroupRaiseCycle(
+                    visibleWindows: nil,
+                    selectedIdentity: nil,
+                    origin: .focus,
+                    refreshHandles: true
+                )
+                return
+            }
+            scheduleFocusedWindowSettlement(
+                expectedPID: expectedPID,
+                preferredIdentity: preferredIdentity,
+                sampledIdentity: sampledIdentity,
+                stableObservationCount: 0,
+                completedAttempts: completedAttempts + 1,
+                generation: generation,
+                delay: focusedWindowConfirmationDelay
+            )
+            return
+        }
+
+        let selectedIdentity: String?
+        if let preferredIdentity,
+           activeSnapshot.contains(preferredIdentity) {
+            selectedIdentity = preferredIdentity
+        } else {
+            selectedIdentity = activeSnapshot.preferredIdentity?.stableIdentity
+        }
+        guard let selectedIdentity else {
+            finishConnectedGroupRaiseCycle(
+                visibleWindows: nil,
+                selectedIdentity: nil,
+                origin: .focus,
+                refreshHandles: true
+            )
+            return
+        }
+
+        let nextStableObservationCount = FocusedWindowSettlementState
+            .nextObservationCount(
+                previousIdentity: sampledIdentity,
+                currentIdentity: selectedIdentity,
+                previousCount: stableObservationCount
+            )
+
+        guard nextStableObservationCount >= requiredFocusedWindowStableObservations else {
+            guard completedAttempts < maximumFocusedWindowSettleAttempts else {
+                finishConnectedGroupRaiseCycle(
+                    visibleWindows: nil,
+                    selectedIdentity: nil,
+                    origin: .focus,
+                    refreshHandles: true
+                )
+                return
+            }
+            scheduleFocusedWindowSettlement(
+                expectedPID: activeSnapshot.pid,
+                preferredIdentity: selectedIdentity,
+                sampledIdentity: selectedIdentity,
+                stableObservationCount: nextStableObservationCount,
+                completedAttempts: completedAttempts + 1,
+                generation: generation,
+                delay: focusedWindowConfirmationDelay
+            )
+            return
+        }
+
+        pendingFocusedGroupRaiseIdentity = selectedIdentity
+        scheduleConnectedGroupRaiseEvaluation(
+            at: nil,
+            clickedIdentity: selectedIdentity,
+            requiredFocusedIdentity: selectedIdentity,
+            origin: .focus,
+            refreshHandlesWhenSettled: true,
+            resolutionAttempts: 0,
+            completedAttempts: 0,
+            generation: generation,
+            delay: 0
+        )
+    }
+
     private func scheduleConnectedGroupRaiseEvaluation(
-        at point: CGPoint,
+        at point: CGPoint?,
         clickedIdentity: String?,
+        requiredFocusedIdentity: String?,
+        origin: ConnectedGroupRaiseOrigin,
+        refreshHandlesWhenSettled: Bool,
+        resolutionAttempts: Int,
         completedAttempts: Int,
         generation: Int,
         delay: TimeInterval
@@ -2937,6 +3419,10 @@ final class SnapController {
             self.evaluateConnectedGroupRaise(
                 at: point,
                 clickedIdentity: clickedIdentity,
+                requiredFocusedIdentity: requiredFocusedIdentity,
+                origin: origin,
+                refreshHandlesWhenSettled: refreshHandlesWhenSettled,
+                resolutionAttempts: resolutionAttempts,
                 completedAttempts: completedAttempts,
                 generation: generation
             )
@@ -2949,60 +3435,197 @@ final class SnapController {
     }
 
     private func evaluateConnectedGroupRaise(
-        at point: CGPoint,
+        at point: CGPoint?,
         clickedIdentity: String?,
+        requiredFocusedIdentity: String?,
+        origin: ConnectedGroupRaiseOrigin,
+        refreshHandlesWhenSettled: Bool,
+        resolutionAttempts: Int,
         completedAttempts: Int,
         generation: Int
     ) {
-        guard groupRaiseGeneration == generation,
-              isEnabled,
+        guard groupRaiseGeneration == generation else { return }
+        guard isEnabled,
               settings.linkedResizeEnabled,
-              settings.raiseConnectedWindowsOnClick,
               !isApplicationUIVisible,
               handleResizeSession == nil,
               !isHandleResizeFinalizing,
               activeSession == nil,
-              !isAssistPlacementPending else { return }
+              !isAssistPlacementPending else {
+            finishConnectedGroupRaiseCycle(
+                visibleWindows: nil,
+                selectedIdentity: nil,
+                origin: origin,
+                refreshHandles: false
+            )
+            return
+        }
+
+        if let requiredFocusedIdentity {
+            guard let activeSnapshot = windowService
+                .activeWindowIdentitySnapshot() else {
+                finishConnectedGroupRaiseCycle(
+                    visibleWindows: nil,
+                    selectedIdentity: nil,
+                    origin: origin,
+                    refreshHandles: refreshHandlesWhenSettled
+                )
+                return
+            }
+            guard activeSnapshot.contains(requiredFocusedIdentity) else {
+                scheduleConnectedGroupRaiseForFocusedWindow(
+                    expectedPID: activeSnapshot.pid,
+                    preferredIdentity: activeSnapshot
+                        .preferredIdentity?.stableIdentity
+                )
+                return
+            }
+        }
 
         let visibleWindows = windowService.visibleWindows()
+        guard settings.raiseConnectedWindowsOnClick else {
+            finishConnectedGroupRaiseCycle(
+                visibleWindows: visibleWindows,
+                selectedIdentity: requiredFocusedIdentity,
+                origin: origin,
+                refreshHandles: refreshHandlesWhenSettled
+            )
+            return
+        }
         let clickedWindow: ManagedWindow?
         if let clickedIdentity {
             clickedWindow = visibleWindows.first {
                 $0.stableIdentity == clickedIdentity
             }
-        } else {
+        } else if let point {
             clickedWindow = resolvedUserWindowAtMouseUp(
                 at: point,
                 visibleWindows: visibleWindows
             )
+        } else {
+            clickedWindow = nil
         }
         guard let clickedWindow,
               let groupWindows = connectedSnapGroupWindows(
                   for: clickedWindow,
                   visibleWindows: visibleWindows
-              ) else { return }
+              ) else {
+            if origin == .pointer,
+               point != nil,
+               resolutionAttempts < maximumPlainClickResolutionAttempts {
+                scheduleConnectedGroupRaiseEvaluation(
+                    at: point,
+                    clickedIdentity: nil,
+                    requiredFocusedIdentity: nil,
+                    origin: .pointer,
+                    refreshHandlesWhenSettled: false,
+                    resolutionAttempts: resolutionAttempts + 1,
+                    completedAttempts: completedAttempts,
+                    generation: generation,
+                    delay: groupRaiseVerificationDelay
+                )
+                return
+            }
+            finishConnectedGroupRaiseCycle(
+                visibleWindows: visibleWindows,
+                selectedIdentity: requiredFocusedIdentity,
+                origin: origin,
+                refreshHandles: refreshHandlesWhenSettled
+            )
+            return
+        }
 
         if connectedGroupIsAlreadyFrontmost(
             groupWindows,
             within: visibleWindows
         ) {
-            if completedAttempts > 0 {
-                refreshResizeHandleOcclusion(force: true)
-            }
+            finishConnectedGroupRaiseCycle(
+                visibleWindows: visibleWindows,
+                selectedIdentity: clickedWindow.stableIdentity,
+                origin: origin,
+                refreshHandles: refreshHandlesWhenSettled
+                    || completedAttempts > 0
+            )
             return
         }
 
         guard completedAttempts < maximumGroupRaiseAttempts else {
-            refreshResizeHandleOcclusion(force: true)
+            finishConnectedGroupRaiseCycle(
+                visibleWindows: visibleWindows,
+                selectedIdentity: clickedWindow.stableIdentity,
+                origin: origin,
+                refreshHandles: true
+            )
             return
         }
         _ = raiseWindows(groupWindows, withMainWindow: clickedWindow)
         scheduleConnectedGroupRaiseEvaluation(
             at: point,
             clickedIdentity: clickedWindow.stableIdentity,
+            requiredFocusedIdentity: requiredFocusedIdentity,
+            origin: origin,
+            refreshHandlesWhenSettled: refreshHandlesWhenSettled,
+            resolutionAttempts: resolutionAttempts,
             completedAttempts: completedAttempts + 1,
             generation: generation,
             delay: groupRaiseVerificationDelay
+        )
+    }
+
+    private func finishConnectedGroupRaiseCycle(
+        visibleWindows: [ManagedWindow]?,
+        selectedIdentity: String?,
+        origin: ConnectedGroupRaiseOrigin,
+        refreshHandles: Bool
+    ) {
+        if refreshHandles {
+            refreshResizeHandles(using: visibleWindows)
+        }
+
+        pendingFocusedGroupRaiseIdentity = nil
+        let deferredPID = deferredFocusedWindowSignalPID
+        let deferredIdentity = deferredFocusedWindowIdentity
+        let deferredPoint = deferredPlainClickPoint
+        deferredFocusedWindowSignalPID = nil
+        deferredFocusedWindowIdentity = nil
+        deferredPlainClickPoint = nil
+
+        // A focus change may arrive while the pointer fallback is verifying
+        // Z-order. Never discard that newer selection. This was the other race
+        // that made the next ordinary click appear to be required.
+        if origin == .pointer, let deferredPID {
+            scheduleConnectedGroupRaiseForFocusedWindow(
+                expectedPID: deferredPID,
+                preferredIdentity: deferredIdentity
+            )
+            return
+        }
+
+        guard origin == .focus else { return }
+        guard let deferredPID,
+              let activeSnapshot = windowService
+                .activeWindowIdentitySnapshot() else {
+            if selectedIdentity == nil, let deferredPoint {
+                scheduleConnectedGroupRaiseForPlainClick(at: deferredPoint)
+            }
+            return
+        }
+        let nextIdentity: String?
+        if let deferredIdentity,
+           deferredIdentity != selectedIdentity,
+           activeSnapshot.contains(deferredIdentity) {
+            nextIdentity = deferredIdentity
+        } else if let selectedIdentity,
+                  activeSnapshot.contains(selectedIdentity) {
+            return
+        } else {
+            nextIdentity = activeSnapshot.preferredIdentity?.stableIdentity
+        }
+        scheduleConnectedGroupRaiseForFocusedWindow(
+            expectedPID: activeSnapshot.pid == deferredPID
+                ? deferredPID
+                : activeSnapshot.pid,
+            preferredIdentity: nextIdentity
         )
     }
 
@@ -3060,6 +3683,10 @@ final class SnapController {
         groupRaiseGeneration &+= 1
         pendingGroupRaiseWorkItem?.cancel()
         pendingGroupRaiseWorkItem = nil
+        pendingFocusedGroupRaiseIdentity = nil
+        deferredFocusedWindowSignalPID = nil
+        deferredFocusedWindowIdentity = nil
+        deferredPlainClickPoint = nil
     }
 
     @discardableResult
@@ -3674,6 +4301,8 @@ final class SnapController {
         guard CGEventSource.buttonState(.combinedSessionState, button: .left),
               pendingDragWindow != nil || dragWindow != nil else {
             resetDragState()
+            activeWindowObserver.observeFrontmostApplication()
+            scheduleSelectionDrivenGroupRaise(expectedPID: nil)
             return
         }
     }
@@ -3681,6 +4310,7 @@ final class SnapController {
     private func invalidatePendingOperations(rollbackPendingPlacements: Bool = true) {
         interactionGeneration &+= 1
         invalidatePendingGroupRaise()
+        invalidatePendingSelectionRaise()
         isAssistPlacementPending = false
         windowService.cancelAllFrameOperations()
         let invalidatedHandleSession = handleResizeSession

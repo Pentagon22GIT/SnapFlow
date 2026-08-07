@@ -13,7 +13,14 @@ struct ManagedWindow {
     let cgWindowID: CGWindowID?
 
     var stableIdentity: String {
-        return "ax:\(pid):\(CFHash(element))"
+        Self.stableIdentity(for: element, pid: pid)
+    }
+
+    static func stableIdentity(
+        for element: AXUIElement,
+        pid: pid_t
+    ) -> String {
+        "ax:\(pid):\(CFHash(element))"
     }
 
     func replacingFrame(_ newFrame: CGRect) -> ManagedWindow {
@@ -65,6 +72,115 @@ struct WindowOcclusionParticipant: Equatable {
     let windowID: CGWindowID?
 }
 
+struct FocusedWindowIdentity: Equatable {
+    let pid: pid_t
+    let stableIdentity: String
+}
+
+struct ActiveWindowIdentitySnapshot: Equatable {
+    let pid: pid_t
+    let focusedIdentity: String?
+    let mainIdentity: String?
+
+    var preferredIdentity: FocusedWindowIdentity? {
+        guard let stableIdentity = mainIdentity ?? focusedIdentity else {
+            return nil
+        }
+        return FocusedWindowIdentity(
+            pid: pid,
+            stableIdentity: stableIdentity
+        )
+    }
+
+    func contains(_ stableIdentity: String) -> Bool {
+        focusedIdentity == stableIdentity || mainIdentity == stableIdentity
+    }
+}
+
+struct FocusedWindowPollState {
+    private(set) var hasBaseline = false
+    private(set) var lastSnapshot: ActiveWindowIdentitySnapshot?
+
+    mutating func observe(
+        _ currentSnapshot: ActiveWindowIdentitySnapshot?
+    ) -> FocusedWindowIdentity? {
+        guard hasBaseline else {
+            hasBaseline = true
+            lastSnapshot = currentSnapshot
+            return nil
+        }
+        guard currentSnapshot != lastSnapshot else { return nil }
+        let previousSnapshot = lastSnapshot
+        lastSnapshot = currentSnapshot
+        guard let currentSnapshot else { return nil }
+
+        if currentSnapshot.pid != previousSnapshot?.pid {
+            return currentSnapshot.preferredIdentity
+        }
+        if currentSnapshot.mainIdentity != previousSnapshot?.mainIdentity,
+           let mainIdentity = currentSnapshot.mainIdentity {
+            return FocusedWindowIdentity(
+                pid: currentSnapshot.pid,
+                stableIdentity: mainIdentity
+            )
+        }
+        if currentSnapshot.focusedIdentity
+            != previousSnapshot?.focusedIdentity,
+           let focusedIdentity = currentSnapshot.focusedIdentity {
+            return FocusedWindowIdentity(
+                pid: currentSnapshot.pid,
+                stableIdentity: focusedIdentity
+            )
+        }
+        return nil
+    }
+
+    mutating func reset() {
+        hasBaseline = false
+        lastSnapshot = nil
+    }
+}
+
+struct FocusedWindowSettlementState {
+    static func nextObservationCount(
+        previousIdentity: String?,
+        currentIdentity: String?,
+        previousCount: Int
+    ) -> Int {
+        guard let currentIdentity else { return 0 }
+        guard previousIdentity == currentIdentity else { return 1 }
+        return previousCount + 1
+    }
+}
+
+struct WindowServerSelectionSnapshot: Equatable {
+    let pid: pid_t
+    let windowID: CGWindowID
+}
+
+struct WindowServerSelectionPollState {
+    private(set) var hasBaseline = false
+    private(set) var lastSnapshot: WindowServerSelectionSnapshot?
+
+    mutating func observe(
+        _ currentSnapshot: WindowServerSelectionSnapshot?
+    ) -> WindowServerSelectionSnapshot? {
+        guard hasBaseline else {
+            hasBaseline = true
+            lastSnapshot = currentSnapshot
+            return nil
+        }
+        guard currentSnapshot != lastSnapshot else { return nil }
+        lastSnapshot = currentSnapshot
+        return currentSnapshot
+    }
+
+    mutating func reset() {
+        hasBaseline = false
+        lastSnapshot = nil
+    }
+}
+
 final class AXWindowService {
     private struct CGWindowRecord {
         let id: CGWindowID
@@ -95,6 +211,64 @@ final class AXWindowService {
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
         guard let window: AXUIElement = copyAttribute(appElement, kAXFocusedWindowAttribute as CFString) else { return nil }
         return makeManagedWindow(window, pid: app.processIdentifier, app: app, cgWindowID: nil)
+    }
+
+    func activeWindowIdentitySnapshot() -> ActiveWindowIdentitySnapshot? {
+        guard isTrusted,
+              let app = NSWorkspace.shared.frontmostApplication,
+              app.processIdentifier
+                != ProcessInfo.processInfo.processIdentifier else { return nil }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        let focusedWindow: AXUIElement? = copyAttribute(
+            appElement,
+            kAXFocusedWindowAttribute as CFString
+        )
+        let mainWindow: AXUIElement? = copyAttribute(
+            appElement,
+            kAXMainWindowAttribute as CFString
+        )
+        guard focusedWindow != nil || mainWindow != nil else { return nil }
+        return ActiveWindowIdentitySnapshot(
+            pid: app.processIdentifier,
+            focusedIdentity: focusedWindow.map {
+                ManagedWindow.stableIdentity(
+                    for: $0,
+                    pid: app.processIdentifier
+                )
+            },
+            mainIdentity: mainWindow.map {
+                ManagedWindow.stableIdentity(
+                    for: $0,
+                    pid: app.processIdentifier
+                )
+            }
+        )
+    }
+
+    func windowServerSelectionSnapshot() -> WindowServerSelectionSnapshot? {
+        guard let application = NSWorkspace.shared.frontmostApplication,
+              application.processIdentifier
+                != ProcessInfo.processInfo.processIdentifier else { return nil }
+        let pid = application.processIdentifier
+        guard let info = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else { return nil }
+
+        for item in info {
+            guard ((item[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0) == 0,
+                  ((item[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1) > 0,
+                  let pidNumber = item[kCGWindowOwnerPID as String] as? NSNumber,
+                  pidNumber.int32Value == pid,
+                  let idNumber = item[kCGWindowNumber as String] as? NSNumber else {
+                continue
+            }
+            return WindowServerSelectionSnapshot(
+                pid: pid,
+                windowID: CGWindowID(idNumber.uint32Value)
+            )
+        }
+        return nil
     }
 
     func refreshed(_ window: ManagedWindow) -> ManagedWindow? {
