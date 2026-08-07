@@ -153,6 +153,7 @@ final class SnapController {
     var isEnabled = true {
         didSet {
             if !isEnabled {
+                updateSelectionMonitoringState()
                 invalidatePendingOperations()
                 stopEscapeMonitoring()
                 overlay.hide()
@@ -170,6 +171,7 @@ final class SnapController {
                     guard let self, self.isEnabled else { return }
                     self.focusedWindowPollState.reset()
                     self.windowServerSelectionPollState.reset()
+                    self.updateSelectionMonitoringState()
                     self.activeWindowObserver.observeFrontmostApplication()
                     self.refreshResizeHandles()
                 }
@@ -192,6 +194,7 @@ final class SnapController {
     private var defaultObservers: [NSObjectProtocol] = []
     private var recoveryTimer: Timer?
     private var focusedWindowPollTimer: Timer?
+    private var isControllerRunning = false
     private var focusedWindowPollState = FocusedWindowPollState()
     private var windowServerSelectionPollState = WindowServerSelectionPollState()
     private let focusedWindowPollInterval: TimeInterval = 0.10
@@ -232,7 +235,11 @@ final class SnapController {
     private var suppressedEntryEdge: SnapEntryEdge?
     private var suppressedDisplayID: CGDirectDisplayID?
     private var snapshotTransactions: [SnapshotTransaction] = []
-    private var lockedPlacements: [String: LockedPlacement] = [:]
+    private var lockedPlacements: [String: LockedPlacement] = [:] {
+        didSet {
+            updateSelectionMonitoringState()
+        }
+    }
     private var detachedConnections: Set<SplitConnectionKey> = []
     private var constraintHints: [String: WindowConstraintHint] = [:]
     private var restoreFrames: [String: CGRect] = [:]
@@ -294,16 +301,18 @@ final class SnapController {
     }
 
     func start() {
+        isControllerRunning = true
         _ = windowService.requestPermissionIfNeeded()
         installEventMonitors()
         installRecoveryObservers()
         startRecoveryTimer()
-        startFocusedWindowPolling()
+        updateSelectionMonitoringState()
         activeWindowObserver.observeFrontmostApplication()
         refreshResizeHandles()
     }
 
     func stop() {
+        isControllerRunning = false
         if let globalMonitor { NSEvent.removeMonitor(globalMonitor); self.globalMonitor = nil }
         if let localMonitor { NSEvent.removeMonitor(localMonitor); self.localMonitor = nil }
         stopEscapeMonitoring()
@@ -314,10 +323,7 @@ final class SnapController {
         defaultObservers.removeAll()
         recoveryTimer?.invalidate()
         recoveryTimer = nil
-        focusedWindowPollTimer?.invalidate()
-        focusedWindowPollTimer = nil
-        focusedWindowPollState.reset()
-        windowServerSelectionPollState.reset()
+        stopFocusedWindowPolling()
         activeWindowObserver.stop()
         invalidatePendingSelectionRaise()
         invalidatePendingOperations()
@@ -545,6 +551,7 @@ final class SnapController {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
+            self.updateSelectionMonitoringState()
             if !self.settings.linkedResizeEnabled,
                self.handleResizeSession != nil {
                 self.cancelHandleResize(restoreOriginalFrames: true)
@@ -554,20 +561,52 @@ final class SnapController {
         })
     }
 
+    private func updateSelectionMonitoringState() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.updateSelectionMonitoringState()
+            }
+            return
+        }
+
+        let shouldRun = MonitoringLifecyclePolicy.shouldRunSelectionPolling(
+            controllerIsRunning: isControllerRunning,
+            snapFlowIsEnabled: isEnabled,
+            linkedResizeIsEnabled: settings.linkedResizeEnabled,
+            connectedWindowRaiseIsEnabled: settings.raiseConnectedWindowsOnClick,
+            lockedPlacementCount: lockedPlacements.count
+        )
+        if shouldRun {
+            startFocusedWindowPolling()
+        } else {
+            stopFocusedWindowPolling()
+        }
+    }
+
     private func startFocusedWindowPolling() {
-        focusedWindowPollTimer?.invalidate()
+        guard focusedWindowPollTimer == nil else { return }
         focusedWindowPollState.reset()
         windowServerSelectionPollState.reset()
         pollFocusedWindowIdentity()
-        focusedWindowPollTimer = Timer.scheduledTimer(
-            withTimeInterval: focusedWindowPollInterval,
-            repeats: true
-        ) { [weak self] _ in
+        let timer = Timer(timeInterval: focusedWindowPollInterval, repeats: true) {
+            [weak self] _ in
             self?.pollFocusedWindowIdentity()
         }
-        if let focusedWindowPollTimer {
-            RunLoop.main.add(focusedWindowPollTimer, forMode: .common)
-        }
+        focusedWindowPollTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopFocusedWindowPolling() {
+        guard focusedWindowPollTimer != nil
+                || focusedWindowPollState.hasBaseline
+                || windowServerSelectionPollState.hasBaseline
+                || windowServerSelectionPollState.lastSnapshot != nil
+                || pendingSelectionRaiseWorkItem != nil else { return }
+        focusedWindowPollTimer?.invalidate()
+        focusedWindowPollTimer = nil
+        focusedWindowPollState.reset()
+        windowServerSelectionPollState.reset()
+        invalidatePendingSelectionRaise()
     }
 
     private func pollFocusedWindowIdentity() {
@@ -782,6 +821,7 @@ final class SnapController {
     }
 
     private func recoverIfNeeded() {
+        updateSelectionMonitoringState()
         guard isEnabled else { return }
         activeWindowObserver.observeFrontmostApplication()
 

@@ -1,7 +1,7 @@
 # Security and Operational Audit
 
-監査基準日: 2026-08-07（v1.2.2追補）
-対象: SnapFlow v1.2.2公開準備プロジェクト
+監査基準日: 2026-08-07（v1.2.3追補）
+対象: SnapFlow v1.2.3公開準備プロジェクト
 監査種別: ソースコード、ビルド、署名、配布、GitHub運用、プライバシー、ライセンスの静的レビュー
 
 ## 結論
@@ -10,7 +10,7 @@
 
 一方、Accessibilityを使用する以上、アプリまたは公式署名鍵が侵害された場合の影響は小さくありません。また自己署名証明書はAppleによる本人確認、Notarization、失効を提供しません。このため「安全を保証済み」ではなく、「明示した脅威に対して多層防御を実施し、残余リスクを公開した状態」と評価します。
 
-公式v1.2.2公開の条件は、実際のmacOS上でCI、テスト、公式署名、ウィンドウ選択前面化を含む実機試験が成功し、作成したRelease成果物を再ダウンロードして検証できることです。
+公式v1.2.3公開の条件は、実際のmacOS上でCI、テスト、公式署名、ウィンドウ選択前面化、監視Timer停止・復帰を含む実機試験が成功し、作成したRelease成果物を再ダウンロードして検証できることです。
 実施済み検証と未実施の動的検証は[Validation Record](VALIDATION.md)へ分離して記録しています。
 
 ## 対象ファイル
@@ -336,6 +336,22 @@ Mission Control、アプリ切替、Space切替、同一アプリ内のウィン
 - 新しい権限、ネットワーク通信、外部依存、永続ログ、Helper、XPC、Daemonを追加していません。
 
 静的監査では新規のHighまたはMedium重要度に相当する未対処問題は確認していません。低重要度の定常負荷として、100ms確認が全Window Serverレコードを内部構造へ変換していた点を修正し、必要なPIDとWindow IDを見つけた時点で走査を終了する方式へ変更しました。Mission Control終了時刻とWindow Server反映時刻はアプリ・OSごとに異なるため、[v1.2.2 Validation Record](VALIDATION_v1.2.2.md)の実機試験をRelease条件とします。
+
+## v1.2.3 追補監査
+
+v1.2.2の選択検証を維持したまま、監視結果を利用しない状態のWakeupを削減するTimerライフサイクルを監査しました。
+
+- 10Hz選択Timerは、Controller起動中、SnapFlow有効、連動リサイズ有効、接続グループ前面化有効、スナップ登録2件以上をすべて満たす間だけ存在します。
+- OFF、登録不足、Controller停止ではTimerをinvalidateし、選択baselineと保留中の選択前面化要求も同時に破棄します。
+- 再開はAX、Workspace通知だけに依存せず、設定変更、登録数変更、起動、再有効化から即時評価します。既存1秒Recoveryも再開漏れのSafety Netとして状態を再確認します。
+- 再開直後の最初のPIDとWindow IDはbaseline保存だけに使用し、Timer再生成自体を選択変更として扱いません。
+- 既存1秒Recovery TimerはSnapFlow無効中もv1.2.2と同じ状態で維持し、選択Timerの再開評価漏れを自己修復するSafety Netとして使用します。
+- Recovery Timerの停止条件、生成方法、周期、tolerance、RunLoop登録方法は変更していません。
+- 5Hz化、idle時の周波数低下、通知のみへの移行、接続グラフの推測キャッシュは採用していません。
+- PID、Window ID、連続3回安定、可視ウィンドウ完全一致、接続グラフ再解決、AXRaise直前確認、世代取消、最大二回の前面化試行を変更していません。
+- 新しい権限、外部Package、ネットワーク通信、永続ログ、画面取得、Helper、XPC、Daemonは追加していません。
+
+静的監査では新規のHighまたはMedium重要度に相当する未対処問題は確認していません。主な残余リスクは、Timerの再開条件を将来追加した際の再評価漏れと、macOSまたはアプリごとの通知・Window Server反映時刻の差です。[v1.2.3 Validation Record](VALIDATION_v1.2.3.md)の実機試験とpowermetrics再測定をRelease条件とします。
 
 ## 参考情報
 

@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-08-07
+
+### Added
+
+- 選択監視の長寿命な実行条件を純粋関数で判定する`MonitoringLifecyclePolicy`を追加
+- Timerの生成条件、無効化、再開、baseline再構築を検証する専用テストを追加
+
+### Changed
+
+- 100msのWindow Server選択監視を、SnapFlow、連動リサイズ、接続グループ前面化が有効で、スナップ登録が2件以上ある期間だけ生成する方式へ変更
+- 設定変更、スナップ登録数変更、起動、停止、再有効化、既存の1秒Recoveryから選択監視状態を再評価するstate-driven lifecycleへ変更
+
+### Fixed
+
+- 前面化設定OFF、連動リサイズOFF、SnapFlow無効、スナップ登録不足でも100ms Timerが常時発火し、毎秒約10回の不要なWakeupを発生させる問題
+- Timer停止後に古い選択baselineまたは保留中の前面化要求が残り、再開後の状態へ作用し得る経路
+
+### Security
+
+- PID、Window ID、3回安定確認、可視ウィンドウ完全一致、接続グラフ再解決、AXRaise直前確認、世代取消、最大試行回数を変更せず維持
+- Timer再開をAX通知だけに依存させず、SnapFlow内部の状態遷移と1秒RecoveryをSafety Netとして使用
+- 新しい権限、外部依存、ネットワーク通信、画面取得、永続ログ、Helper、XPC、Daemonを追加せずに実装
+
 ## [1.2.2] - 2026-08-07
 
 ### Added
