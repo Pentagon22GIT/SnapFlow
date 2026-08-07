@@ -33,7 +33,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         action: nil
     )
     private let raiseConnectedWindowsOnClickCheckbox = NSButton(
-        checkboxWithTitle: "スナップ中のウィンドウクリックによる最前面移動",
+        checkboxWithTitle: "スナップ中のウィンドウ選択による最前面移動",
         target: nil,
         action: nil
     )
@@ -188,7 +188,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         raiseConnectedWindowsOnClickCheckbox.action = #selector(toggleRaiseConnectedWindowsOnClick)
         linkedResizeOptionsStack.addArrangedSubview(raiseConnectedWindowsOnClickCheckbox)
         let raiseConnectedWindowsOnClickNote = NSTextField(
-            wrappingLabelWithString: "スナップに所属しているウィンドウをクリックした時に、接続されているウィンドウも一緒に最前面へ移動します。"
+            wrappingLabelWithString: "スナップに所属しているウィンドウを通常クリック、Mission Control、アプリ切替などで選択した時に、接続されているウィンドウも一緒に最前面へ移動します。"
         )
         raiseConnectedWindowsOnClickNote.textColor = .secondaryLabelColor
         raiseConnectedWindowsOnClickNote.maximumNumberOfLines = 0

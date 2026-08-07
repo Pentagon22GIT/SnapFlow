@@ -25,6 +25,16 @@ struct SplitZOrderWindow {
     let frame: CGRect
 }
 
+struct RecoveryWindowSceneItem: Equatable {
+    let relativeZIndex: Int
+    let windowID: CGWindowID
+    let pid: pid_t
+    let minXHalfPoints: Int
+    let minYHalfPoints: Int
+    let widthHalfPoints: Int
+    let heightHalfPoints: Int
+}
+
 enum SplitAxis: CaseIterable, Hashable {
     case horizontal
     case vertical
@@ -123,6 +133,25 @@ struct SplitConnectionKey: Hashable {
 }
 
 enum SplitLayoutGeometry {
+    static func recoverySceneSignature(
+        for snapshot: [WindowOcclusionSnapshot]
+    ) -> [RecoveryWindowSceneItem] {
+        snapshot
+            .filter({ $0.layer == 0 })
+            .enumerated()
+            .map { relativeZIndex, window in
+                RecoveryWindowSceneItem(
+                    relativeZIndex: relativeZIndex,
+                    windowID: window.windowID,
+                    pid: window.pid,
+                    minXHalfPoints: Int((window.frame.minX * 2).rounded()),
+                    minYHalfPoints: Int((window.frame.minY * 2).rounded()),
+                    widthHalfPoints: Int((window.frame.width * 2).rounded()),
+                    heightHalfPoints: Int((window.frame.height * 2).rounded())
+                )
+            }
+    }
+
     static func connectedGroupIsFrontmost(
         groupIDs: Set<String>,
         orderedWindows: [SplitZOrderWindow]
