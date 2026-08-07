@@ -84,6 +84,30 @@ private struct ManualResizeSession {
     var participants: [String: ManualResizeParticipant]
 }
 
+private struct HandleResizeParticipant {
+    let window: ManagedWindow
+    let zone: SnapZone
+    let originalFrame: CGRect
+    let side: SplitBoundarySide
+    let constraintReference: CGSize
+    var targetFrame: CGRect
+}
+
+private struct HandleResizeSession {
+    let handleID: String
+    let displayID: CGDirectDisplayID
+    let screenFrame: CGRect
+    let axis: SplitAxis
+    let mainIdentity: String
+    let liveIdentities: Set<String>
+    let virtualIdentities: Set<String>
+    let allowedBoundary: ClosedRange<CGFloat>
+    let schedulerGeneration: Int
+    let snapshots: [WindowSnapshot]
+    var participants: [String: HandleResizeParticipant]
+    var boundaryCoordinate: CGFloat
+}
+
 private struct LayoutSession {
     let layoutZones: [SnapZone]
     var occupiedZones: [SnapZone: String]
@@ -129,8 +153,15 @@ final class SnapController {
                 overlay.hide()
                 picker.hide()
                 virtualResizeOverlay.hideAll()
+                resizeHandleOverlay.hideAll()
+                cancelHandleResize(restoreOriginalFrames: true)
                 resetDragState()
                 activeSession = nil
+            } else if oldValue != isEnabled {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.isEnabled else { return }
+                    self.refreshResizeHandles()
+                }
             }
         }
     }
@@ -139,6 +170,8 @@ final class SnapController {
     private let overlay = OverlayPanel()
     private let picker = WindowPickerPanel()
     private let virtualResizeOverlay = VirtualResizeOverlay()
+    private let resizeHandleOverlay = ResizeHandleOverlay()
+    private lazy var liveResizeScheduler = LiveResizeScheduler(windowService: windowService)
     private let settings = AppSettings.shared
     private var globalMonitor: Any?
     private var localMonitor: Any?
@@ -192,12 +225,39 @@ final class SnapController {
     private var interactionGeneration = 0
     private var pendingPlacementSnapshots: [String: WindowSnapshot] = [:]
     private var inFlightPlacementIDs: Set<String> = []
+    private var handleResizeSession: HandleResizeSession?
+    private var isHandleResizeFinalizing = false
+    private var finalizingHandleResizeSession: HandleResizeSession?
+    private var baseResizeHandleDescriptors: [ResizeHandleDescriptor] = []
+    private var lastHandleOcclusionRefreshAt: TimeInterval = 0
+    private let handleOcclusionRefreshInterval: TimeInterval = 1.0 / 20.0
+    private var consecutiveHandleOcclusionFailures = 0
+    private var handlePresentationGeneration = 0
+    private var scheduledHandleOcclusionRetryGeneration: Int?
+    private var shouldRestoreHandlesAfterPointerInteraction = false
+    private var isApplicationUIVisible = false
+
+    init() {
+        resizeHandleOverlay.onBegin = { [weak self] descriptor, point in
+            self?.beginHandleResize(descriptor: descriptor, at: point)
+        }
+        resizeHandleOverlay.onChange = { [weak self] descriptor, point in
+            self?.updateHandleResize(descriptor: descriptor, at: point)
+        }
+        resizeHandleOverlay.onEnd = { [weak self] descriptor, point in
+            self?.finishHandleResize(descriptor: descriptor, at: point)
+        }
+        resizeHandleOverlay.onCancel = { [weak self] _ in
+            self?.cancelHandleResize(restoreOriginalFrames: true)
+        }
+    }
 
     func start() {
         _ = windowService.requestPermissionIfNeeded()
         installEventMonitors()
         installRecoveryObservers()
         startRecoveryTimer()
+        refreshResizeHandles()
     }
 
     func stop() {
@@ -215,6 +275,8 @@ final class SnapController {
         overlay.hide()
         picker.hide()
         virtualResizeOverlay.hideAll()
+        resizeHandleOverlay.hideAll()
+        liveResizeScheduler.cancelAll()
         resetDragState()
         activeSession = nil
     }
@@ -234,9 +296,12 @@ final class SnapController {
         overlay.hide()
         picker.hide()
         virtualResizeOverlay.hideAll()
+        resizeHandleOverlay.hideAll()
+        cancelHandleResize(restoreOriginalFrames: true)
     }
 
     func restoreLast() {
+        guard handleResizeSession == nil, !isHandleResizeFinalizing else { return }
         let visibleIDs = windowService.visibleStableIdentities()
         var targetIndex: Int?
         var staleIndices: [Int] = []
@@ -302,15 +367,31 @@ final class SnapController {
     }
 
     func clearLocks() {
+        invalidatePendingOperations()
         lockedPlacements.removeAll()
         detachedConnections.removeAll()
         activeSession = nil
         stopEscapeMonitoring()
         picker.hide()
         virtualResizeOverlay.hideAll()
+        resizeHandleOverlay.hideAll()
+    }
+
+    func setApplicationUIVisible(_ isVisible: Bool) {
+        isApplicationUIVisible = isVisible
+        if isVisible {
+            if handleResizeSession != nil {
+                cancelHandleResize(restoreOriginalFrames: true)
+            } else {
+                resizeHandleOverlay.hideAll()
+            }
+        } else {
+            refreshResizeHandles()
+        }
     }
 
     func snapFocusedWindow(to zone: SnapZone) {
+        guard handleResizeSession == nil, !isHandleResizeFinalizing else { return }
         guard isEnabled, ensurePermission(),
               let window = windowService.focusedWindow(),
               let screen = screen(containing: window.frame.center) ?? NSScreen.main else { return }
@@ -326,6 +407,9 @@ final class SnapController {
         }
         let localMask: NSEvent.EventTypeMask = [mouseMask, .keyDown]
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: localMask) { [weak self] event in
+            if self?.resizeHandleOverlay.owns(window: event.window) == true {
+                return event
+            }
             self?.handle(event)
             return event
         }
@@ -335,7 +419,14 @@ final class SnapController {
         guard globalEscapeMonitor == nil else { return }
         globalEscapeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard event.keyCode == 53 else { return }
-            DispatchQueue.main.async { self?.cancelAssist() }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.handleResizeSession != nil {
+                    self.cancelHandleResize(restoreOriginalFrames: true)
+                } else {
+                    self.cancelAssist()
+                }
+            }
         }
     }
 
@@ -374,12 +465,34 @@ final class SnapController {
             self?.cancelAssist()
         })
 
+        workspaceObservers.append(workspaceCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: NSWorkspace.shared,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshResizeHandleOcclusion(force: true)
+        })
+
         defaultObservers.append(defaultCenter.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
             self?.cancelAssist()
+        })
+
+        defaultObservers.append(defaultCenter.addObserver(
+            forName: AppSettings.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            if !self.settings.linkedResizeEnabled,
+               self.handleResizeSession != nil {
+                self.cancelHandleResize(restoreOriginalFrames: true)
+            } else if self.handleResizeSession == nil {
+                self.refreshResizeHandles()
+            }
         })
     }
 
@@ -395,6 +508,14 @@ final class SnapController {
 
     private func recoverIfNeeded() {
         guard isEnabled else { return }
+
+        if handleResizeSession == nil,
+           pendingDragWindow == nil,
+           dragWindow == nil,
+           manualResizeWindow == nil,
+           !isWindowMoveConfirmed {
+            refreshResizeHandles()
+        }
 
         if (dragWindow != nil || pendingDragWindow != nil),
            !CGEventSource.buttonState(.combinedSessionState, button: .left) {
@@ -417,9 +538,612 @@ final class SnapController {
         }
     }
 
+    private func refreshResizeHandles(
+        using providedVisibleWindows: [ManagedWindow]? = nil,
+        deferOcclusionRefresh: Bool = false
+    ) {
+        guard isEnabled,
+              settings.linkedResizeEnabled,
+              handleResizeSession == nil,
+              !isHandleResizeFinalizing,
+              activeSession == nil,
+              !isAssistPlacementPending,
+              !isApplicationUIVisible else {
+            if handleResizeSession == nil {
+                handlePresentationGeneration &+= 1
+                baseResizeHandleDescriptors = []
+                resizeHandleOverlay.hideAll()
+            }
+            return
+        }
+
+        let visibleWindows = providedVisibleWindows ?? windowService.visibleWindows()
+        let windowsByIdentity = Dictionary(
+            visibleWindows.map { ($0.stableIdentity, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var descriptors: [ResizeHandleDescriptor] = []
+
+        for screen in NSScreen.screens {
+            guard let screenDisplayID = displayID(for: screen) else { continue }
+            let placements = lockedPlacements.compactMap { identity, placement
+                -> SplitPlacementGeometry? in
+                guard placement.displayID == screenDisplayID,
+                      !inFlightPlacementIDs.contains(identity),
+                      let window = windowsByIdentity[identity] else { return nil }
+                return SplitPlacementGeometry(
+                    stableIdentity: identity,
+                    zone: placement.zone,
+                    frame: window.frame
+                )
+            }
+            let geometries = SplitLayoutGeometry.resizeHandleGeometries(
+                placements: placements,
+                detachedConnections: detachedConnections
+            )
+            descriptors.append(contentsOf: geometries.map { geometry in
+                let occlusionParticipants = geometry.participantIDs.sorted().compactMap {
+                    identity -> WindowOcclusionParticipant? in
+                    guard let window = windowsByIdentity[identity] else { return nil }
+                    return WindowOcclusionParticipant(
+                        pid: window.pid,
+                        frame: window.frame,
+                        windowID: window.cgWindowID
+                    )
+                }
+                return ResizeHandleDescriptor(
+                    id: resizeHandleIdentity(
+                        displayID: screenDisplayID,
+                        geometry: geometry
+                    ),
+                    displayID: screenDisplayID,
+                    axis: geometry.axis,
+                    coordinate: geometry.coordinate,
+                    span: geometry.span,
+                    screenFrame: screen.visibleFrame,
+                    participantIDs: geometry.participantIDs,
+                    occlusionParticipants: occlusionParticipants
+                )
+            })
+        }
+        handlePresentationGeneration &+= 1
+        baseResizeHandleDescriptors = descriptors
+        consecutiveHandleOcclusionFailures = 0
+        guard !deferOcclusionRefresh else { return }
+        refreshResizeHandleOcclusion(force: true)
+    }
+
+    private func refreshResizeHandleOcclusion(force: Bool = false) {
+        guard isEnabled,
+              settings.linkedResizeEnabled,
+              handleResizeSession == nil,
+              !isHandleResizeFinalizing,
+              activeSession == nil,
+              !isAssistPlacementPending,
+              !isApplicationUIVisible else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard force || now - lastHandleOcclusionRefreshAt
+            >= handleOcclusionRefreshInterval else { return }
+        lastHandleOcclusionRefreshAt = now
+
+        let snapshot = windowService.windowOcclusionSnapshot()
+        var visibleDescriptors: [ResizeHandleDescriptor] = []
+        for descriptor in baseResizeHandleDescriptors {
+            guard descriptor.occlusionParticipants.count
+                    == descriptor.participantIDs.count,
+                  let occluders = windowService.occludingWindows(
+                above: descriptor.occlusionParticipants,
+                in: snapshot
+            ) else {
+                handleIncompleteOcclusionSnapshot()
+                return
+            }
+            visibleDescriptors.append(contentsOf: visibleResizeHandleDescriptors(
+                for: descriptor,
+                occludingFrames: occluders.compactMap {
+                    $0.layer == 0 ? $0.frame : nil
+                }
+            ))
+        }
+        resizeHandleOverlay.update(visibleDescriptors)
+        resizeHandleOverlay.setInputSuspended(false)
+        consecutiveHandleOcclusionFailures = 0
+        if scheduledHandleOcclusionRetryGeneration
+            == handlePresentationGeneration {
+            scheduledHandleOcclusionRetryGeneration = nil
+        }
+    }
+
+    private func handleIncompleteOcclusionSnapshot() {
+        consecutiveHandleOcclusionFailures += 1
+
+        // Window Server and Accessibility information can briefly disagree just
+        // after a snap, activation, or Space transition. Do not destroy the
+        // last known-good handles in that transient state. When there is no
+        // previous presentation yet, show the base geometry as a safe fallback
+        // until occlusion information becomes available.
+        if !resizeHandleOverlay.hasPresentedHandles,
+           !baseResizeHandleDescriptors.isEmpty {
+            resizeHandleOverlay.update(baseResizeHandleDescriptors)
+        }
+        resizeHandleOverlay.setInputSuspended(true)
+        let retryGeneration = handlePresentationGeneration
+        guard scheduledHandleOcclusionRetryGeneration != retryGeneration else {
+            return
+        }
+        scheduledHandleOcclusionRetryGeneration = retryGeneration
+        let retryDelay: TimeInterval
+        switch consecutiveHandleOcclusionFailures {
+        case 0...2:
+            retryDelay = 0.05
+        case 3...5:
+            retryDelay = 0.15
+        default:
+            retryDelay = 0.50
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + retryDelay) { [weak self] in
+            guard let self,
+                  self.scheduledHandleOcclusionRetryGeneration
+                    == retryGeneration else { return }
+            self.scheduledHandleOcclusionRetryGeneration = nil
+            guard self.handlePresentationGeneration == retryGeneration else {
+                return
+            }
+            self.refreshResizeHandleOcclusion(force: true)
+        }
+    }
+
+    private func visibleResizeHandleDescriptors(
+        for descriptor: ResizeHandleDescriptor,
+        occludingFrames: [CGRect]
+    ) -> [ResizeHandleDescriptor] {
+        let spans = SplitLayoutGeometry.visibleHandleSpans(
+            span: descriptor.span,
+            axis: descriptor.axis,
+            coordinate: descriptor.coordinate,
+            occludingFrames: occludingFrames
+        )
+        guard !spans.isEmpty else { return [] }
+
+        let originalCenter = (
+            descriptor.span.lowerBound + descriptor.span.upperBound
+        ) / 2
+        let primaryIndex = spans.firstIndex(where: { $0.contains(originalCenter) })
+            ?? spans.indices.max {
+                let lhsLength = spans[$0].upperBound - spans[$0].lowerBound
+                let rhsLength = spans[$1].upperBound - spans[$1].lowerBound
+                return lhsLength < rhsLength
+            }
+            ?? spans.startIndex
+
+        return spans.enumerated().map { index, span in
+            ResizeHandleDescriptor(
+                id: "\(descriptor.id):visible:\(index)",
+                displayID: descriptor.displayID,
+                axis: descriptor.axis,
+                coordinate: descriptor.coordinate,
+                span: span,
+                screenFrame: descriptor.screenFrame,
+                participantIDs: descriptor.participantIDs,
+                occlusionParticipants: descriptor.occlusionParticipants,
+                showsPill: index == primaryIndex
+            )
+        }
+    }
+
+    private func resizeHandleIdentity(
+        displayID: CGDirectDisplayID,
+        geometry: SplitResizeHandleGeometry
+    ) -> String {
+        let axis = geometry.axis == .horizontal ? "h" : "v"
+        let participants = geometry.participantIDs.sorted().joined(separator: "|")
+        return "\(displayID):\(axis):\(participants)"
+    }
+
+    private func beginHandleResize(
+        descriptor: ResizeHandleDescriptor,
+        at point: CGPoint
+    ) {
+        guard isEnabled,
+              settings.linkedResizeEnabled,
+              handleResizeSession == nil,
+              !isHandleResizeFinalizing,
+              ensurePermission(),
+              let screen = screen(withDisplayID: descriptor.displayID) else {
+            refreshResizeHandles()
+            return
+        }
+
+        invalidatePendingOperations()
+        activeSession = nil
+        picker.hide()
+        overlay.hide()
+        virtualResizeOverlay.hideAll()
+        resetDragState()
+
+        let visibleWindows = windowService.visibleWindows()
+        let windowsByIdentity = Dictionary(
+            visibleWindows.map { ($0.stableIdentity, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        guard let mainWindow = resolvedHandleMainWindow(
+            participantIDs: descriptor.participantIDs,
+            visibleWindows: visibleWindows
+        ) else {
+            refreshResizeHandles()
+            return
+        }
+
+        var participants: [String: HandleResizeParticipant] = [:]
+        var participantGeometry: [SplitResizeParticipantGeometry] = []
+        let tolerance = CGFloat(settings.layoutIntrusionTolerance)
+        for identity in descriptor.participantIDs {
+            guard let window = windowsByIdentity[identity],
+                  let placement = lockedPlacements[identity],
+                  placement.displayID == descriptor.displayID,
+                  let side = SplitLayoutGeometry.boundarySide(
+                      for: placement.zone,
+                      axis: descriptor.axis
+                  ) else { continue }
+            let reference = constraintReference(
+                for: window,
+                zone: placement.zone,
+                on: screen
+            )
+            let referenceLength = descriptor.axis == .horizontal
+                ? reference.width
+                : reference.height
+            participants[identity] = HandleResizeParticipant(
+                window: window,
+                zone: placement.zone,
+                originalFrame: window.frame,
+                side: side,
+                constraintReference: reference,
+                targetFrame: window.frame
+            )
+            participantGeometry.append(SplitResizeParticipantGeometry(
+                stableIdentity: identity,
+                frame: window.frame,
+                side: side,
+                minimumLength: max(referenceLength * (1 - tolerance), 1)
+            ))
+        }
+        guard participants.count >= 2,
+              participants[mainWindow.stableIdentity] != nil,
+              let allowedBoundary = SplitLayoutGeometry.allowedBoundaryRange(
+                  axis: descriptor.axis,
+                  participants: participantGeometry,
+                  screenFrame: screen.visibleFrame
+              ) else {
+            refreshResizeHandles()
+            return
+        }
+
+        // Raise only the participants of this still-active handle. Do not
+        // activate every application here; AXRaise preserves the drag event,
+        // while the clicked/main participant is raised last.
+        raiseWindows(
+            participants.values.map(\.window),
+            withMainWindow: mainWindow
+        )
+
+        let allIdentities = Set(participants.keys)
+        let liveIdentities: Set<String>
+        switch settings.linkedResizeDisplayMode {
+        case .lightweight:
+            liveIdentities = []
+        case .mainOnly:
+            liveIdentities = [mainWindow.stableIdentity]
+        case .allWindows:
+            liveIdentities = allIdentities
+        }
+        let virtualIdentities = allIdentities.subtracting(liveIdentities)
+        let snapshots = participants.values.map { windowService.snapshot($0.window) }
+        let schedulerGeneration = liveResizeScheduler.begin()
+        handleResizeSession = HandleResizeSession(
+            handleID: descriptor.id,
+            displayID: descriptor.displayID,
+            screenFrame: screen.visibleFrame,
+            axis: descriptor.axis,
+            mainIdentity: mainWindow.stableIdentity,
+            liveIdentities: liveIdentities,
+            virtualIdentities: virtualIdentities,
+            allowedBoundary: allowedBoundary,
+            schedulerGeneration: schedulerGeneration,
+            snapshots: snapshots,
+            participants: participants,
+            boundaryCoordinate: descriptor.coordinate
+        )
+        inFlightPlacementIDs.formUnion(allIdentities)
+        resizeHandleOverlay.beginInteraction(with: descriptor.id)
+        startEscapeMonitoring()
+        updateHandleResize(descriptor: descriptor, at: point)
+    }
+
+    private func resolvedHandleMainWindow(
+        participantIDs: Set<String>,
+        visibleWindows: [ManagedWindow]
+    ) -> ManagedWindow? {
+        if let focused = windowService.focusedWindow(),
+           participantIDs.contains(focused.stableIdentity),
+           let matching = visibleWindows.first(where: {
+               $0.stableIdentity == focused.stableIdentity
+           }) {
+            return matching
+        }
+        return visibleWindows.first { participantIDs.contains($0.stableIdentity) }
+    }
+
+    private func updateHandleResize(
+        descriptor: ResizeHandleDescriptor,
+        at point: CGPoint
+    ) {
+        guard var session = handleResizeSession,
+              session.handleID == descriptor.id else { return }
+        let proposed = session.axis == .horizontal ? point.x : point.y
+        let coordinate = min(
+            max(proposed, session.allowedBoundary.lowerBound),
+            session.allowedBoundary.upperBound
+        )
+        let geometry = session.participants.map { identity, participant in
+            SplitResizeParticipantGeometry(
+                stableIdentity: identity,
+                frame: participant.originalFrame,
+                side: participant.side,
+                minimumLength: 1
+            )
+        }
+        let targetFrames = SplitLayoutGeometry.resizedFrames(
+            meetingBoundary: coordinate,
+            axis: session.axis,
+            participants: geometry
+        )
+        for (identity, targetFrame) in targetFrames {
+            guard var participant = session.participants[identity] else { continue }
+            participant.targetFrame = targetFrame
+            session.participants[identity] = participant
+        }
+        session.boundaryCoordinate = coordinate
+        handleResizeSession = session
+
+        let primaryTop = NSScreen.screens.first?.frame.maxY ?? 0
+        let liveRequests = session.liveIdentities.compactMap { identity
+            -> LiveResizeRequest? in
+            guard let participant = session.participants[identity] else { return nil }
+            return LiveResizeRequest(
+                stableIdentity: identity,
+                element: participant.window.element,
+                targetFrame: participant.targetFrame,
+                primaryScreenTop: primaryTop
+            )
+        }
+        liveResizeScheduler.submit(
+            liveRequests,
+            generation: session.schedulerGeneration
+        )
+
+        let virtualItems = session.virtualIdentities.compactMap { identity
+            -> VirtualResizeItem? in
+            guard let participant = session.participants[identity] else { return nil }
+            return VirtualResizeItem(
+                stableIdentity: identity,
+                originalFrame: participant.originalFrame,
+                targetFrame: participant.targetFrame,
+                appIcon: participant.window.appIcon
+            )
+        }
+        let liveFrames = session.liveIdentities.compactMap {
+            session.participants[$0]?.targetFrame
+        }
+        virtualResizeOverlay.update(
+            items: virtualItems,
+            liveFrames: liveFrames,
+            screenFrame: session.screenFrame
+        )
+        let movedDescriptor = ResizeHandleDescriptor(
+            id: descriptor.id,
+            displayID: descriptor.displayID,
+            axis: descriptor.axis,
+            coordinate: coordinate,
+            span: descriptor.span,
+            screenFrame: descriptor.screenFrame,
+            participantIDs: descriptor.participantIDs
+        )
+        resizeHandleOverlay.update([movedDescriptor])
+    }
+
+    private func finishHandleResize(
+        descriptor: ResizeHandleDescriptor,
+        at point: CGPoint
+    ) {
+        guard handleResizeSession?.handleID == descriptor.id else { return }
+        updateHandleResize(descriptor: descriptor, at: point)
+        guard let session = handleResizeSession else { return }
+        updateHandleSettlementOverlay(session, restoreOriginalFrames: false)
+        handleResizeSession = nil
+        isHandleResizeFinalizing = true
+        finalizingHandleResizeSession = session
+        stopEscapeMonitoring()
+        liveResizeScheduler.stop(generation: session.schedulerGeneration) { [weak self] in
+            self?.completeHandleResize(session)
+        }
+    }
+
+    private func completeHandleResize(_ session: HandleResizeSession) {
+        guard isHandleResizeFinalizing,
+              finalizingHandleResizeSession?.schedulerGeneration
+                == session.schedulerGeneration else { return }
+        let operationGeneration = interactionGeneration
+        let identities = Set(session.participants.keys)
+        var pending = session.participants.count
+        var allSucceeded = true
+        var acceptedWindows: [String: ManagedWindow] = [:]
+
+        for (identity, participant) in session.participants {
+            windowService.setFrameAnchoredReliably(
+                participant.targetFrame,
+                sizeConstraintAnchor: participant.zone.sizeConstraintAnchor,
+                requiredOuterEdges: participant.zone.requiredOuterEdges,
+                for: participant.window.element
+            ) { [weak self] succeeded in
+                guard let self else { return }
+                guard self.isHandleResizeFinalizing,
+                      self.finalizingHandleResizeSession?.schedulerGeneration
+                        == session.schedulerGeneration else { return }
+                let refreshed = self.windowService.refreshed(participant.window)
+                let edgesMatch = refreshed.map {
+                    self.matchesRequiredOuterEdges(
+                        $0.frame,
+                        targetFrame: participant.targetFrame,
+                        requiredEdges: participant.zone.requiredOuterEdges
+                    )
+                } ?? false
+                allSucceeded = allSucceeded && succeeded && edgesMatch
+                if let refreshed {
+                    acceptedWindows[identity] = refreshed
+                }
+                pending -= 1
+                guard pending == 0 else { return }
+
+                if allSucceeded,
+                   self.interactionGeneration == operationGeneration {
+                    for (acceptedIdentity, accepted) in acceptedWindows {
+                        self.observeConstraint(
+                            for: accepted,
+                            requestedSize: session.participants[acceptedIdentity]?.targetFrame.size
+                                ?? accepted.frame.size
+                        )
+                        if var placement = self.lockedPlacements[acceptedIdentity] {
+                            placement.appliedFrame = accepted.frame
+                            self.lockedPlacements[acceptedIdentity] = placement
+                        }
+                    }
+                    for first in identities {
+                        for second in identities where first < second {
+                            self.detachedConnections.remove(
+                                SplitConnectionKey(first, second)
+                            )
+                        }
+                    }
+                    for window in acceptedWindows.values
+                        where window.stableIdentity != session.mainIdentity {
+                        self.windowService.raise(window)
+                    }
+                    if let main = acceptedWindows[session.mainIdentity] {
+                        self.windowService.focus(main)
+                    }
+                    self.finishHandleResizePresentation(
+                        identities: identities,
+                        schedulerGeneration: session.schedulerGeneration
+                    )
+                } else {
+                    self.rollbackTransaction(session.snapshots) { [weak self] _ in
+                        self?.finishHandleResizePresentation(
+                            identities: identities,
+                            schedulerGeneration: session.schedulerGeneration
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func finishHandleResizePresentation(
+        identities: Set<String>,
+        schedulerGeneration: Int
+    ) {
+        guard isHandleResizeFinalizing,
+              finalizingHandleResizeSession?.schedulerGeneration
+                == schedulerGeneration else { return }
+        isHandleResizeFinalizing = false
+        finalizingHandleResizeSession = nil
+        inFlightPlacementIDs.subtract(identities)
+        virtualResizeOverlay.hideAll()
+        resizeHandleOverlay.endInteraction()
+        refreshResizeHandles()
+    }
+
+    private func cancelHandleResize(restoreOriginalFrames: Bool) {
+        guard let session = handleResizeSession else {
+            resizeHandleOverlay.endInteraction()
+            return
+        }
+        updateHandleSettlementOverlay(
+            session,
+            restoreOriginalFrames: restoreOriginalFrames
+        )
+        handleResizeSession = nil
+        isHandleResizeFinalizing = true
+        finalizingHandleResizeSession = session
+        stopEscapeMonitoring()
+        let identities = Set(session.participants.keys)
+        liveResizeScheduler.stop(generation: session.schedulerGeneration) { [weak self] in
+            guard let self else { return }
+            guard restoreOriginalFrames else {
+                self.finishHandleResizePresentation(
+                    identities: identities,
+                    schedulerGeneration: session.schedulerGeneration
+                )
+                return
+            }
+            self.rollbackTransaction(session.snapshots) { [weak self] _ in
+                self?.finishHandleResizePresentation(
+                    identities: identities,
+                    schedulerGeneration: session.schedulerGeneration
+                )
+            }
+        }
+    }
+
+    private func updateHandleSettlementOverlay(
+        _ session: HandleResizeSession,
+        restoreOriginalFrames: Bool
+    ) {
+        guard !session.virtualIdentities.isEmpty else {
+            virtualResizeOverlay.hideAll()
+            return
+        }
+        let items = session.virtualIdentities.compactMap { identity
+            -> VirtualResizeItem? in
+            guard let participant = session.participants[identity] else {
+                return nil
+            }
+            let displayedTarget = restoreOriginalFrames
+                ? participant.originalFrame
+                : participant.targetFrame
+            return VirtualResizeItem(
+                stableIdentity: identity,
+                originalFrame: participant.originalFrame.union(participant.targetFrame),
+                targetFrame: displayedTarget,
+                appIcon: participant.window.appIcon
+            )
+        }
+        virtualResizeOverlay.update(
+            items: items,
+            liveFrames: session.liveIdentities.compactMap {
+                session.participants[$0]?.targetFrame
+            },
+            screenFrame: session.screenFrame
+        )
+    }
+
     private func handle(_ event: NSEvent) {
         guard isEnabled else { return }
         lastInteractionAt = Date()
+
+        if handleResizeSession == nil, event.type == .leftMouseDragged {
+            refreshResizeHandleOcclusion()
+        }
+
+        if handleResizeSession != nil {
+            if event.type == .keyDown, event.keyCode == 53 {
+                cancelHandleResize(restoreOriginalFrames: true)
+            }
+            return
+        }
+        if isHandleResizeFinalizing {
+            return
+        }
 
         if event.type == .keyDown, event.keyCode == 53 {
             cancelAssist()
@@ -434,7 +1158,11 @@ final class SnapController {
             if picker.isVisible && picker.containsScreenPoint(point) {
                 return
             }
-            cancelAssist()
+            if isAssistPlacementPending {
+                cancelAssist()
+                return
+            }
+            dismissAssistPresentationForPointerDown()
             beginPendingDrag(at: point)
 
         case .leftMouseDragged:
@@ -463,15 +1191,52 @@ final class SnapController {
             if isAssistPlacementPending {
                 return
             }
+            let mousePoint = NSEvent.mouseLocation
+            let wasPlainClick = activeSession == nil
+                && manualResizeWindow == nil
+                && !isWindowMoveConfirmed
+                && !hasWindowActuallyMoved
+                && !didStartDragRestore
             if finishManualResizeIfNeeded() {
+                shouldRestoreHandlesAfterPointerInteraction = false
                 overlay.hide()
                 return
             }
+            var didChangeSplitPresentation = false
+            var clickVisibleWindows: [ManagedWindow]?
+            if wasPlainClick {
+                let visibleWindows = windowService.visibleWindows()
+                clickVisibleWindows = visibleWindows
+                if let clickedWindow = resolvedUserWindowAtMouseUp(
+                    at: mousePoint,
+                    visibleWindows: visibleWindows
+                ) {
+                    didChangeSplitPresentation = handlePlainWindowClick(
+                        clickedWindow,
+                        visibleWindows: visibleWindows
+                    )
+                }
+            }
             if activeSession == nil {
-                handleDrop(at: NSEvent.mouseLocation)
+                handleDrop(at: mousePoint)
             } else if !picker.isVisible {
                 cancelAssist()
             }
+            if !wasPlainClick {
+                refreshResizeHandleOcclusion(force: true)
+            } else {
+                if shouldRestoreHandlesAfterPointerInteraction,
+                   let clickVisibleWindows {
+                    refreshResizeHandles(
+                        using: clickVisibleWindows,
+                        deferOcclusionRefresh: didChangeSplitPresentation
+                    )
+                }
+                if didChangeSplitPresentation {
+                    schedulePostZOrderHandleRefresh()
+                }
+            }
+            shouldRestoreHandlesAfterPointerInteraction = false
 
         default:
             break
@@ -511,8 +1276,19 @@ final class SnapController {
         prepareManualResizeIfNeeded(at: point, driver: window)
     }
 
+    private func dismissAssistPresentationForPointerDown() {
+        shouldRestoreHandlesAfterPointerInteraction = activeSession != nil
+            || picker.isVisible
+        stopEscapeMonitoring()
+        overlay.hide()
+        picker.hide()
+        virtualResizeOverlay.hideAll()
+        resetDragState()
+        activeSession = nil
+    }
+
     private func prepareManualResizeIfNeeded(at point: CGPoint, driver: ManagedWindow) {
-        guard settings.linkedResizeEnabled,
+        guard settings.nativeResizeRecoveryIsActive,
               pendingDragStartedNearResizeEdge,
               let placement = lockedPlacements[driver.stableIdentity] else { return }
         var axes: Set<SplitAxis> = []
@@ -604,7 +1380,8 @@ final class SnapController {
         guard sizeChanged else { return false }
 
         manualResizeWindow = currentWindow
-        if settings.linkedResizeEnabled, manualResizeSession == nil {
+        if settings.nativeResizeRecoveryIsActive,
+           manualResizeSession == nil {
             manualResizeSession = makeManualResizeSession(
                 driver: currentWindow,
                 originalFrame: originalFrame
@@ -665,7 +1442,8 @@ final class SnapController {
             return false
         }
 
-        guard settings.linkedResizeEnabled else {
+        guard settings.nativeResizeRecoveryIsActive,
+              manualResizeSession != nil else {
             releaseManualResizeProtection(
                 driverIdentity: currentWindow.stableIdentity,
                 session: manualResizeSession
@@ -997,13 +1775,11 @@ final class SnapController {
                     referenceLength: referenceLength
                 )
             }
-            if participant.isSuspended {
-                participant.isSuspended = !compressionDegrees.allSatisfy {
-                    $0 <= max(tolerance - SplitLayoutGeometry.ratioHysteresis, 0)
-                }
-            } else {
-                participant.isSuspended = compressionDegrees.contains { $0 > tolerance }
-            }
+            participant.isSuspended = SplitLayoutGeometry.remainsSuspended(
+                wasSuspended: participant.isSuspended,
+                compressionRatios: compressionDegrees,
+                tolerance: tolerance
+            )
 
             if !participant.isSuspended {
                 overlayItems.append(VirtualResizeItem(
@@ -2092,13 +2868,178 @@ final class SnapController {
         commitSnapshots(snapshots)
         restoreFrames[window.stableIdentity] = restoreFrame
         registerLock(for: window, zone: zone, on: screen)
+        raiseSnapGroup(withMainWindow: window, on: screen)
         advanceAssist(
             with: window,
             justPlacedZone: zone,
             on: screen,
             continueAssist: continueAssist
         )
+        refreshResizeHandles()
         completion?(true)
+    }
+
+    private func resolvedUserWindowAtMouseUp(
+        at point: CGPoint,
+        visibleWindows: [ManagedWindow]
+    ) -> ManagedWindow? {
+        if let pendingDragWindow,
+           let current = visibleWindows.first(where: {
+               $0.stableIdentity == pendingDragWindow.stableIdentity
+           }),
+           current.frame.contains(point),
+           windowService.canMoveAndResize(current) {
+            return current
+        }
+        return visibleWindows.first {
+            $0.frame.contains(point) && windowService.canMoveAndResize($0)
+        }
+    }
+
+    private func handlePlainWindowClick(
+        _ clickedWindow: ManagedWindow,
+        visibleWindows: [ManagedWindow]
+    ) -> Bool {
+        guard isEnabled,
+              settings.linkedResizeEnabled,
+              !isApplicationUIVisible,
+              handleResizeSession == nil,
+              !isHandleResizeFinalizing,
+              activeSession == nil,
+              !isAssistPlacementPending else { return false }
+
+        if settings.raiseConnectedWindowsOnClick,
+           let groupWindows = connectedSnapGroupWindows(
+               for: clickedWindow,
+               visibleWindows: visibleWindows
+           ),
+           !connectedGroupIsAlreadyFrontmost(
+               groupWindows,
+               within: visibleWindows
+        ) {
+            return raiseWindows(groupWindows, withMainWindow: clickedWindow)
+        }
+        return false
+    }
+
+    private func connectedSnapGroupWindows(
+        for clickedWindow: ManagedWindow,
+        visibleWindows: [ManagedWindow]
+    ) -> [ManagedWindow]? {
+        guard let placement = lockedPlacements[clickedWindow.stableIdentity],
+              let screen = screen(withDisplayID: placement.displayID),
+              let currentDisplayID = displayID(for: screen) else { return nil }
+
+        let windowsByIdentity = Dictionary(
+            visibleWindows.map { ($0.stableIdentity, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let placements = lockedPlacements.compactMap { identity, placement
+            -> SplitPlacementGeometry? in
+            guard placement.displayID == currentDisplayID,
+                  let currentWindow = windowsByIdentity[identity] else { return nil }
+            return SplitPlacementGeometry(
+                stableIdentity: identity,
+                zone: placement.zone,
+                frame: currentWindow.frame
+            )
+        }
+        let handles = SplitLayoutGeometry.resizeHandleGeometries(
+            placements: placements,
+            detachedConnections: detachedConnections
+        )
+        let groupIDs = SplitLayoutGeometry.connectedParticipantIDs(
+            startingWith: clickedWindow.stableIdentity,
+            handles: handles
+        )
+        guard groupIDs.count >= 2 else { return nil }
+        return visibleWindows.filter { groupIDs.contains($0.stableIdentity) }
+    }
+
+    private func connectedGroupIsAlreadyFrontmost(
+        _ groupWindows: [ManagedWindow],
+        within visibleWindows: [ManagedWindow]
+    ) -> Bool {
+        let groupIDs = Set(groupWindows.map(\.stableIdentity))
+        return SplitLayoutGeometry.connectedGroupIsFrontmost(
+            groupIDs: groupIDs,
+            orderedWindows: visibleWindows.map {
+                SplitZOrderWindow(
+                    stableIdentity: $0.stableIdentity,
+                    frame: $0.frame
+                )
+            }
+        )
+    }
+
+    private func schedulePostZOrderHandleRefresh() {
+        handlePresentationGeneration &+= 1
+        let refreshGeneration = handlePresentationGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
+            guard let self,
+                  self.handlePresentationGeneration == refreshGeneration else {
+                return
+            }
+            self.refreshResizeHandleOcclusion(force: true)
+        }
+    }
+
+    @discardableResult
+    private func raiseWindows(
+        _ windows: [ManagedWindow],
+        withMainWindow mainWindow: ManagedWindow
+    ) -> Bool {
+        var seen = Set<String>()
+        let uniqueWindows = windows.filter {
+            seen.insert($0.stableIdentity).inserted
+        }
+        let followers = uniqueWindows.filter {
+            $0.stableIdentity != mainWindow.stableIdentity
+        }
+        var didRaiseAnyWindow = false
+        for follower in followers.reversed() {
+            didRaiseAnyWindow = windowService.raise(follower) || didRaiseAnyWindow
+        }
+        didRaiseAnyWindow = windowService.raise(mainWindow) || didRaiseAnyWindow
+        return didRaiseAnyWindow
+    }
+
+    private func raiseSnapGroup(
+        withMainWindow mainWindow: ManagedWindow,
+        on screen: NSScreen,
+        requiresConnectedPeer: Bool = false
+    ) {
+        guard let currentDisplayID = displayID(for: screen) else { return }
+        let visibleWindows = windowService.visibleWindows()
+        let windowsByIdentity = Dictionary(
+            visibleWindows.map { ($0.stableIdentity, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let placements = lockedPlacements.compactMap { identity, placement
+            -> SplitPlacementGeometry? in
+            guard placement.displayID == currentDisplayID,
+                  let currentWindow = windowsByIdentity[identity] else { return nil }
+            return SplitPlacementGeometry(
+                stableIdentity: identity,
+                zone: placement.zone,
+                frame: currentWindow.frame
+            )
+        }
+        let handles = SplitLayoutGeometry.resizeHandleGeometries(
+            placements: placements,
+            detachedConnections: detachedConnections
+        )
+
+        let groupIDs = SplitLayoutGeometry.connectedParticipantIDs(
+            startingWith: mainWindow.stableIdentity,
+            handles: handles
+        )
+
+        if requiresConnectedPeer, groupIDs.count < 2 { return }
+        let groupWindows = visibleWindows.filter {
+            groupIDs.contains($0.stableIdentity)
+        }
+        raiseWindows(groupWindows, withMainWindow: mainWindow)
     }
 
     private func rollbackTransaction(
@@ -2222,8 +3163,10 @@ final class SnapController {
                 return self.windowService.previewCGImage(for: windowID)
             },
             onCancel: { [weak self] in
-                self?.activeSession = nil
-                self?.stopEscapeMonitoring()
+                guard let self else { return }
+                self.activeSession = nil
+                self.stopEscapeMonitoring()
+                self.refreshResizeHandles()
             }
         ) { [weak self] selected, targetZone in
             guard let self else { return }
@@ -2252,6 +3195,7 @@ final class SnapController {
                     self.isAssistPlacementPending = false
                     self.activeSession = nil
                     self.picker.hide()
+                    self.refreshResizeHandles()
                     return
                 }
 
@@ -2268,6 +3212,7 @@ final class SnapController {
                     if !succeeded {
                         self.activeSession = nil
                         self.picker.hide()
+                        self.refreshResizeHandles()
                     }
                 }
             }
@@ -2631,6 +3576,10 @@ final class SnapController {
     }
 
     private func handleActiveSpaceChange() {
+        if handleResizeSession != nil {
+            cancelHandleResize(restoreOriginalFrames: true)
+        }
+        resizeHandleOverlay.hideAll()
         invalidatePendingOperations()
         resetSideDwellState()
         stopEscapeMonitoring()
@@ -2655,6 +3604,44 @@ final class SnapController {
         interactionGeneration &+= 1
         isAssistPlacementPending = false
         windowService.cancelAllFrameOperations()
+        let invalidatedHandleSession = handleResizeSession
+            ?? finalizingHandleResizeSession
+        handleResizeSession = nil
+        finalizingHandleResizeSession = nil
+        if let invalidatedHandleSession {
+            updateHandleSettlementOverlay(
+                invalidatedHandleSession,
+                restoreOriginalFrames: true
+            )
+            isHandleResizeFinalizing = true
+            stopEscapeMonitoring()
+            let identities = Set(invalidatedHandleSession.participants.keys)
+            liveResizeScheduler.stop(
+                generation: invalidatedHandleSession.schedulerGeneration
+            ) { [weak self] in
+                guard let self else { return }
+                for snapshot in invalidatedHandleSession.snapshots {
+                    if snapshot.wasFullscreen {
+                        _ = self.windowService.setFullscreen(
+                            true,
+                            for: snapshot.element
+                        )
+                    } else {
+                        _ = self.windowService.setFrame(
+                            snapshot.frame,
+                            for: snapshot.element
+                        )
+                    }
+                }
+                self.isHandleResizeFinalizing = false
+                self.inFlightPlacementIDs.subtract(identities)
+                self.virtualResizeOverlay.hideAll()
+                self.resizeHandleOverlay.endInteraction()
+                self.refreshResizeHandles()
+            }
+        } else {
+            liveResizeScheduler.cancelAll()
+        }
         inFlightPlacementIDs.removeAll()
         guard rollbackPendingPlacements else { return }
 
@@ -2670,6 +3657,10 @@ final class SnapController {
     }
 
     private func cancelAssist() {
+        if handleResizeSession != nil {
+            cancelHandleResize(restoreOriginalFrames: true)
+            return
+        }
         invalidatePendingOperations()
         stopEscapeMonitoring()
         overlay.hide()
@@ -2677,6 +3668,11 @@ final class SnapController {
         virtualResizeOverlay.hideAll()
         resetDragState()
         activeSession = nil
+
+        // A normal click is also routed through this cancellation path before
+        // drag detection begins. Rebuilding in place avoids destroying and
+        // recreating the handle panels on every tab/title-bar click.
+        refreshResizeHandles()
     }
 
     private func resetDragState() {

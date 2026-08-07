@@ -282,4 +282,559 @@ final class SplitLayoutTests: XCTestCase {
             )
         )
     }
+
+    func testResizeHandleJoinsAFullHeightWindowToTwoQuarterWindows() {
+        let placements = [
+            SplitPlacementGeometry(
+                stableIdentity: "left",
+                zone: .leftHalf,
+                frame: CGRect(x: 0, y: 0, width: 720, height: 900)
+            ),
+            SplitPlacementGeometry(
+                stableIdentity: "top-right",
+                zone: .topRight,
+                frame: CGRect(x: 720, y: 450, width: 720, height: 450)
+            ),
+            SplitPlacementGeometry(
+                stableIdentity: "bottom-right",
+                zone: .bottomRight,
+                frame: CGRect(x: 720, y: 0, width: 720, height: 450)
+            )
+        ]
+        let handles = SplitLayoutGeometry.resizeHandleGeometries(
+            placements: placements
+        )
+        XCTAssertEqual(handles.count, 2)
+        let verticalBoundary = handles.first { $0.axis == .horizontal }
+        XCTAssertEqual(verticalBoundary?.coordinate, 720)
+        XCTAssertEqual(verticalBoundary?.span, 0...900)
+        XCTAssertEqual(
+            verticalBoundary?.participantIDs,
+            Set(["left", "top-right", "bottom-right"])
+        )
+        let rightHorizontalBoundary = handles.first { $0.axis == .vertical }
+        XCTAssertEqual(rightHorizontalBoundary?.coordinate, 450)
+        XCTAssertEqual(rightHorizontalBoundary?.span, 720...1_440)
+        XCTAssertEqual(
+            rightHorizontalBoundary?.participantIDs,
+            Set(["top-right", "bottom-right"])
+        )
+    }
+
+    func testFourQuartersMergeBothBoundariesAcrossTheFullSharedSpan() {
+        let placements = [
+            SplitPlacementGeometry(
+                stableIdentity: "top-left",
+                zone: .topLeft,
+                frame: CGRect(x: 0, y: 450, width: 720, height: 450)
+            ),
+            SplitPlacementGeometry(
+                stableIdentity: "top-right",
+                zone: .topRight,
+                frame: CGRect(x: 720, y: 450, width: 720, height: 450)
+            ),
+            SplitPlacementGeometry(
+                stableIdentity: "bottom-left",
+                zone: .bottomLeft,
+                frame: CGRect(x: 0, y: 0, width: 720, height: 450)
+            ),
+            SplitPlacementGeometry(
+                stableIdentity: "bottom-right",
+                zone: .bottomRight,
+                frame: CGRect(x: 720, y: 0, width: 720, height: 450)
+            )
+        ]
+        let handles = SplitLayoutGeometry.resizeHandleGeometries(
+            placements: placements
+        )
+        XCTAssertEqual(handles.count, 2)
+        let verticalBoundary = handles.first { $0.axis == .horizontal }
+        XCTAssertEqual(verticalBoundary?.coordinate, 720)
+        XCTAssertEqual(verticalBoundary?.span, 0...900)
+        XCTAssertEqual(verticalBoundary?.participantIDs.count, 4)
+        let horizontalBoundary = handles.first { $0.axis == .vertical }
+        XCTAssertEqual(horizontalBoundary?.coordinate, 450)
+        XCTAssertEqual(horizontalBoundary?.span, 0...1_440)
+        XCTAssertEqual(horizontalBoundary?.participantIDs.count, 4)
+    }
+
+    func testNearlyAlignedRowsRemainIndependentUntilFramesActuallyMatch() {
+        let placements = [
+            SplitPlacementGeometry(
+                stableIdentity: "top-left",
+                zone: .topLeft,
+                frame: CGRect(x: 0, y: 450, width: 720, height: 450)
+            ),
+            SplitPlacementGeometry(
+                stableIdentity: "bottom-left",
+                zone: .bottomLeft,
+                frame: CGRect(x: 0, y: 0, width: 720, height: 450)
+            ),
+            SplitPlacementGeometry(
+                stableIdentity: "top-right",
+                zone: .topRight,
+                frame: CGRect(x: 720, y: 456, width: 720, height: 444)
+            ),
+            SplitPlacementGeometry(
+                stableIdentity: "bottom-right",
+                zone: .bottomRight,
+                frame: CGRect(x: 720, y: 0, width: 720, height: 456)
+            )
+        ]
+        let handles = SplitLayoutGeometry.resizeHandleGeometries(
+            placements: placements
+        )
+        let rowHandles = handles.filter { $0.axis == .vertical }
+        XCTAssertEqual(rowHandles.count, 2)
+        XCTAssertEqual(Set(rowHandles.map(\.coordinate)), Set([450, 456]))
+        XCTAssertEqual(
+            rowHandles.map(\.span).sorted {
+                $0.lowerBound < $1.lowerBound
+            },
+            [0...720, 720...1_440]
+        )
+    }
+
+    func testOccluderRemovesOnlyTheCoveredPartOfAHandle() {
+        let spans = SplitLayoutGeometry.visibleHandleSpans(
+            span: 0...900,
+            axis: .horizontal,
+            coordinate: 720,
+            occludingFrames: [CGRect(x: 700, y: 300, width: 100, height: 200)]
+        )
+        XCTAssertEqual(spans, [0...300, 500...900])
+    }
+
+    func testFullyOccludedHandleHasNoInteractiveSpan() {
+        XCTAssertTrue(
+            SplitLayoutGeometry.visibleHandleSpans(
+                span: 0...900,
+                axis: .horizontal,
+                coordinate: 720,
+                occludingFrames: [CGRect(x: 700, y: -20, width: 100, height: 940)]
+            ).isEmpty
+        )
+    }
+
+    func testWindowAwayFromTheInteractionBandDoesNotClipTheHandle() {
+        XCTAssertEqual(
+            SplitLayoutGeometry.visibleHandleSpans(
+                span: 0...900,
+                axis: .horizontal,
+                coordinate: 720,
+                occludingFrames: [CGRect(x: 900, y: 300, width: 100, height: 200)]
+            ),
+            [0...900]
+        )
+    }
+
+    func testOnlyWindowsAboveAHandleParticipantCanOccludeIt() {
+        let snapshot = [
+            WindowOcclusionSnapshot(
+                windowID: 100,
+                pid: 20,
+                frame: CGRect(x: 0, y: 0, width: 100, height: 100),
+                zIndex: 2,
+                layer: 0
+            ),
+            WindowOcclusionSnapshot(
+                windowID: 1,
+                pid: 11,
+                frame: CGRect(x: 0, y: 0, width: 100, height: 100),
+                zIndex: 5,
+                layer: 0
+            ),
+            WindowOcclusionSnapshot(
+                windowID: 101,
+                pid: 21,
+                frame: CGRect(x: 0, y: 0, width: 100, height: 100),
+                zIndex: 7,
+                layer: 0
+            ),
+            WindowOcclusionSnapshot(
+                windowID: 2,
+                pid: 12,
+                frame: CGRect(x: 0, y: 0, width: 100, height: 100),
+                zIndex: 10,
+                layer: 0
+            ),
+            WindowOcclusionSnapshot(
+                windowID: 102,
+                pid: 22,
+                frame: CGRect(x: 0, y: 0, width: 100, height: 100),
+                zIndex: 12,
+                layer: 0
+            )
+        ]
+        let occluders = AXWindowService().occludingWindows(
+            above: [
+                WindowOcclusionParticipant(
+                    pid: 11,
+                    frame: CGRect(x: 0, y: 0, width: 100, height: 100),
+                    windowID: 1
+                ),
+                WindowOcclusionParticipant(
+                    pid: 12,
+                    frame: CGRect(x: 0, y: 0, width: 100, height: 100),
+                    windowID: 2
+                )
+            ],
+            in: snapshot
+        )
+        XCTAssertEqual(Set(occluders?.map(\.windowID) ?? []), Set([100, 101]))
+    }
+
+    func testOcclusionMatchingRecoversFromAStaleParticipantWindowID() {
+        let leftFrame = CGRect(x: 0, y: 0, width: 720, height: 900)
+        let rightFrame = CGRect(x: 720, y: 0, width: 720, height: 900)
+        let snapshot = [
+            WindowOcclusionSnapshot(
+                windowID: 90,
+                pid: 30,
+                frame: CGRect(x: 680, y: 200, width: 300, height: 300),
+                zIndex: 1,
+                layer: 0
+            ),
+            WindowOcclusionSnapshot(
+                windowID: 10,
+                pid: 11,
+                frame: leftFrame,
+                zIndex: 3,
+                layer: 0
+            ),
+            WindowOcclusionSnapshot(
+                windowID: 20,
+                pid: 12,
+                frame: rightFrame,
+                zIndex: 4,
+                layer: 0
+            )
+        ]
+        let occluders = AXWindowService().occludingWindows(
+            above: [
+                WindowOcclusionParticipant(
+                    pid: 11,
+                    frame: leftFrame,
+                    windowID: 999
+                ),
+                WindowOcclusionParticipant(
+                    pid: 12,
+                    frame: rightFrame,
+                    windowID: 20
+                )
+            ],
+            in: snapshot
+        )
+        XCTAssertEqual(occluders?.map(\.windowID), [90])
+    }
+
+    func testAmbiguousParticipantMatchFailsClosed() {
+        let frame = CGRect(x: 0, y: 0, width: 720, height: 900)
+        let snapshot = [
+            WindowOcclusionSnapshot(
+                windowID: 10,
+                pid: 11,
+                frame: frame,
+                zIndex: 1,
+                layer: 0
+            ),
+            WindowOcclusionSnapshot(
+                windowID: 11,
+                pid: 11,
+                frame: frame,
+                zIndex: 2,
+                layer: 0
+            )
+        ]
+        XCTAssertNil(
+            AXWindowService().occludingWindows(
+                above: [
+                    WindowOcclusionParticipant(
+                        pid: 11,
+                        frame: frame,
+                        windowID: nil
+                    )
+                ],
+                in: snapshot
+            )
+        )
+    }
+
+    func testKnownWindowIDWinsOverAmbiguousGeometry() {
+        let frame = CGRect(x: 0, y: 0, width: 720, height: 900)
+        let snapshot = [
+            WindowOcclusionSnapshot(
+                windowID: 10,
+                pid: 11,
+                frame: frame,
+                zIndex: 1,
+                layer: 0
+            ),
+            WindowOcclusionSnapshot(
+                windowID: 11,
+                pid: 11,
+                frame: frame,
+                zIndex: 2,
+                layer: 0
+            )
+        ]
+        XCTAssertEqual(
+            AXWindowService().occludingWindows(
+                above: [
+                    WindowOcclusionParticipant(
+                        pid: 11,
+                        frame: frame,
+                        windowID: 11
+                    )
+                ],
+                in: snapshot
+            )?.map(\.windowID),
+            [10]
+        )
+    }
+
+    func testReusedWindowIDWithWrongGeometryFallsBackToCurrentWindow() {
+        let currentFrame = CGRect(x: 0, y: 0, width: 720, height: 900)
+        let reusedIDFrame = CGRect(x: 900, y: 100, width: 300, height: 400)
+        let snapshot = [
+            WindowOcclusionSnapshot(
+                windowID: 90,
+                pid: 30,
+                frame: CGRect(x: 100, y: 100, width: 200, height: 200),
+                zIndex: 1,
+                layer: 0
+            ),
+            WindowOcclusionSnapshot(
+                windowID: 10,
+                pid: 11,
+                frame: reusedIDFrame,
+                zIndex: 2,
+                layer: 0
+            ),
+            WindowOcclusionSnapshot(
+                windowID: 11,
+                pid: 11,
+                frame: currentFrame,
+                zIndex: 3,
+                layer: 0
+            )
+        ]
+        XCTAssertEqual(
+            AXWindowService().occludingWindows(
+                above: [
+                    WindowOcclusionParticipant(
+                        pid: 11,
+                        frame: currentFrame,
+                        windowID: 10
+                    )
+                ],
+                in: snapshot
+            )?.map(\.windowID),
+            [90, 10]
+        )
+    }
+
+    func testJunctionWaitsForIntentAndLocksToTheDominantDragAxis() {
+        XCTAssertNil(
+            SplitLayoutGeometry.resizeAxis(
+                forDragDelta: CGPoint(x: 2, y: 1)
+            )
+        )
+        XCTAssertEqual(
+            SplitLayoutGeometry.resizeAxis(
+                forDragDelta: CGPoint(x: 8, y: 3)
+            ),
+            .horizontal
+        )
+        XCTAssertEqual(
+            SplitLayoutGeometry.resizeAxis(
+                forDragDelta: CGPoint(x: 3, y: -8)
+            ),
+            .vertical
+        )
+    }
+
+    func testHandleInteractionFrameUsesTheEntireSharedSpan() {
+        let descriptor = ResizeHandleDescriptor(
+            id: "vertical-divider",
+            displayID: 1,
+            axis: .horizontal,
+            coordinate: 720,
+            span: 0...900,
+            screenFrame: screen,
+            participantIDs: ["left", "right"]
+        )
+        XCTAssertEqual(
+            descriptor.interactionFrame(),
+            CGRect(x: 712, y: 0, width: 16, height: 900)
+        )
+    }
+
+    func testConnectedParticipantIDsIncludeTheWholeSplitGroupOnly() {
+        let handles = [
+            SplitResizeHandleGeometry(
+                axis: .horizontal,
+                coordinate: 720,
+                span: 0...900,
+                participantIDs: ["main", "right-top", "right-bottom"]
+            ),
+            SplitResizeHandleGeometry(
+                axis: .vertical,
+                coordinate: 450,
+                span: 720...1_440,
+                participantIDs: ["right-top", "right-bottom"]
+            ),
+            SplitResizeHandleGeometry(
+                axis: .horizontal,
+                coordinate: 200,
+                span: 0...300,
+                participantIDs: ["unrelated-a", "unrelated-b"]
+            )
+        ]
+        XCTAssertEqual(
+            SplitLayoutGeometry.connectedParticipantIDs(
+                startingWith: "main",
+                handles: handles
+            ),
+            Set(["main", "right-top", "right-bottom"])
+        )
+    }
+
+    func testRecoverableResizeUsesHysteresisBeforeReconnecting() {
+        XCTAssertTrue(
+            SplitLayoutGeometry.remainsSuspended(
+                wasSuspended: false,
+                compressionRatios: [0.51],
+                tolerance: 0.5
+            )
+        )
+        XCTAssertTrue(
+            SplitLayoutGeometry.remainsSuspended(
+                wasSuspended: true,
+                compressionRatios: [0.47],
+                tolerance: 0.5
+            )
+        )
+        XCTAssertFalse(
+            SplitLayoutGeometry.remainsSuspended(
+                wasSuspended: true,
+                compressionRatios: [0.44],
+                tolerance: 0.5
+            )
+        )
+    }
+
+    func testResizeHandleDoesNotJoinDetachedWindows() {
+        let placements = [
+            SplitPlacementGeometry(
+                stableIdentity: "left",
+                zone: .leftHalf,
+                frame: CGRect(x: 0, y: 0, width: 720, height: 900)
+            ),
+            SplitPlacementGeometry(
+                stableIdentity: "right",
+                zone: .rightHalf,
+                frame: CGRect(x: 720, y: 0, width: 720, height: 900)
+            )
+        ]
+        XCTAssertTrue(
+            SplitLayoutGeometry.resizeHandleGeometries(
+                placements: placements,
+                detachedConnections: [SplitConnectionKey("left", "right")]
+            ).isEmpty
+        )
+    }
+
+    func testAllowedBoundaryRangeProtectsBothSides() {
+        let participants = [
+            SplitResizeParticipantGeometry(
+                stableIdentity: "left",
+                frame: CGRect(x: 0, y: 0, width: 720, height: 900),
+                side: .nearOrigin,
+                minimumLength: 300
+            ),
+            SplitResizeParticipantGeometry(
+                stableIdentity: "right",
+                frame: CGRect(x: 720, y: 0, width: 720, height: 900),
+                side: .farOrigin,
+                minimumLength: 400
+            )
+        ]
+        XCTAssertEqual(
+            SplitLayoutGeometry.allowedBoundaryRange(
+                axis: .horizontal,
+                participants: participants,
+                screenFrame: screen
+            ),
+            300...1_040
+        )
+    }
+
+    func testHandleResizeUsesOneBoundaryForEveryParticipant() {
+        let participants = [
+            SplitResizeParticipantGeometry(
+                stableIdentity: "left",
+                frame: CGRect(x: 0, y: 0, width: 720, height: 900),
+                side: .nearOrigin,
+                minimumLength: 1
+            ),
+            SplitResizeParticipantGeometry(
+                stableIdentity: "right",
+                frame: CGRect(x: 720, y: 0, width: 720, height: 900),
+                side: .farOrigin,
+                minimumLength: 1
+            )
+        ]
+        let frames = SplitLayoutGeometry.resizedFrames(
+            meetingBoundary: 840,
+            axis: .horizontal,
+            participants: participants
+        )
+        XCTAssertEqual(frames["left"]?.maxX, 840)
+        XCTAssertEqual(frames["right"]?.minX, 840)
+        XCTAssertEqual(frames["left"]?.minX, screen.minX)
+        XCTAssertEqual(frames["right"]?.maxX, screen.maxX)
+    }
+
+    func testConnectedGroupIsAlreadyFrontmostWhenExternalWindowOnlyOverlapsFrontMember() {
+        let windows = [
+            SplitZOrderWindow(
+                stableIdentity: "front-group",
+                frame: CGRect(x: 0, y: 0, width: 500, height: 900)
+            ),
+            SplitZOrderWindow(
+                stableIdentity: "external",
+                frame: CGRect(x: 100, y: 100, width: 200, height: 200)
+            ),
+            SplitZOrderWindow(
+                stableIdentity: "rear-group",
+                frame: CGRect(x: 500, y: 0, width: 500, height: 900)
+            )
+        ]
+        XCTAssertTrue(SplitLayoutGeometry.connectedGroupIsFrontmost(
+            groupIDs: ["front-group", "rear-group"],
+            orderedWindows: windows
+        ))
+    }
+
+    func testConnectedGroupNeedsRaiseWhenExternalWindowOccludesRearMember() {
+        let windows = [
+            SplitZOrderWindow(
+                stableIdentity: "front-group",
+                frame: CGRect(x: 0, y: 0, width: 500, height: 900)
+            ),
+            SplitZOrderWindow(
+                stableIdentity: "external",
+                frame: CGRect(x: 600, y: 100, width: 200, height: 200)
+            ),
+            SplitZOrderWindow(
+                stableIdentity: "rear-group",
+                frame: CGRect(x: 500, y: 0, width: 500, height: 900)
+            )
+        ]
+        XCTAssertFalse(SplitLayoutGeometry.connectedGroupIsFrontmost(
+            groupIDs: ["front-group", "rear-group"],
+            orderedWindows: windows
+        ))
+    }
 }

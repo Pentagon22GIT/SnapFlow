@@ -6,6 +6,25 @@ struct SplitPlacementGeometry {
     let frame: CGRect
 }
 
+struct SplitResizeHandleGeometry: Equatable {
+    let axis: SplitAxis
+    let coordinate: CGFloat
+    let span: ClosedRange<CGFloat>
+    let participantIDs: Set<String>
+}
+
+struct SplitResizeParticipantGeometry {
+    let stableIdentity: String
+    let frame: CGRect
+    let side: SplitBoundarySide
+    let minimumLength: CGFloat
+}
+
+struct SplitZOrderWindow {
+    let stableIdentity: String
+    let frame: CGRect
+}
+
 enum SplitAxis: CaseIterable, Hashable {
     case horizontal
     case vertical
@@ -104,8 +123,274 @@ struct SplitConnectionKey: Hashable {
 }
 
 enum SplitLayoutGeometry {
+    static func connectedGroupIsFrontmost(
+        groupIDs: Set<String>,
+        orderedWindows: [SplitZOrderWindow]
+    ) -> Bool {
+        guard groupIDs.count >= 2 else { return true }
+        for groupIndex in orderedWindows.indices {
+            let groupWindow = orderedWindows[groupIndex]
+            guard groupIDs.contains(groupWindow.stableIdentity) else { continue }
+            for externalIndex in orderedWindows.indices where externalIndex < groupIndex {
+                let externalWindow = orderedWindows[externalIndex]
+                if groupIDs.contains(externalWindow.stableIdentity) { continue }
+                let intersection = groupWindow.frame.intersection(externalWindow.frame)
+                if !intersection.isNull,
+                   intersection.width > 1,
+                   intersection.height > 1 {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
     static let contactTolerance: CGFloat = 8
+    static let boundaryMergeTolerance: CGFloat = 1.5
     static let ratioHysteresis: CGFloat = 0.05
+
+    static func resizeAxis(
+        forDragDelta delta: CGPoint,
+        minimumDistance: CGFloat = 4
+    ) -> SplitAxis? {
+        guard hypot(delta.x, delta.y) >= minimumDistance else { return nil }
+        return abs(delta.x) >= abs(delta.y) ? .horizontal : .vertical
+    }
+
+    static func remainsSuspended(
+        wasSuspended: Bool,
+        compressionRatios: [CGFloat],
+        tolerance: CGFloat
+    ) -> Bool {
+        guard tolerance.isFinite,
+              compressionRatios.allSatisfy({ $0.isFinite }) else { return true }
+        if wasSuspended {
+            let resumeTolerance = max(tolerance - ratioHysteresis, 0)
+            return !compressionRatios.allSatisfy { $0 <= resumeTolerance }
+        }
+        return compressionRatios.contains { $0 > tolerance }
+    }
+
+    static func resizeHandleGeometries(
+        placements: [SplitPlacementGeometry],
+        detachedConnections: Set<SplitConnectionKey> = [],
+        tolerance: CGFloat = contactTolerance,
+        mergeTolerance: CGFloat = boundaryMergeTolerance
+    ) -> [SplitResizeHandleGeometry] {
+        struct Member {
+            let identity: String
+            let axis: SplitAxis
+            let side: SplitBoundarySide
+            let coordinate: CGFloat
+            let span: ClosedRange<CGFloat>
+        }
+
+        var members: [Member] = []
+        for placement in placements where placement.zone != .maximize {
+            for axis in SplitAxis.allCases {
+                guard let side = boundarySide(for: placement.zone, axis: axis) else {
+                    continue
+                }
+                let span: ClosedRange<CGFloat>
+                switch axis {
+                case .horizontal:
+                    span = placement.frame.minY...placement.frame.maxY
+                case .vertical:
+                    span = placement.frame.minX...placement.frame.maxX
+                }
+                members.append(Member(
+                    identity: placement.stableIdentity,
+                    axis: axis,
+                    side: side,
+                    coordinate: boundaryCoordinate(
+                        of: placement.frame,
+                        side: side,
+                        axis: axis
+                    ),
+                    span: span
+                ))
+            }
+        }
+
+        var candidates: [SplitResizeHandleGeometry] = []
+        let nearMembers = members.filter { $0.side == .nearOrigin }
+        let farMembers = members.filter { $0.side == .farOrigin }
+        for near in nearMembers {
+            for far in farMembers where far.axis == near.axis {
+                guard near.identity != far.identity,
+                      abs(near.coordinate - far.coordinate) <= tolerance,
+                      !detachedConnections.contains(
+                          SplitConnectionKey(near.identity, far.identity)
+                      ) else { continue }
+                let lower = max(near.span.lowerBound, far.span.lowerBound)
+                let upper = min(near.span.upperBound, far.span.upperBound)
+                guard upper - lower > tolerance else { continue }
+                candidates.append(SplitResizeHandleGeometry(
+                    axis: near.axis,
+                    coordinate: (near.coordinate + far.coordinate) / 2,
+                    span: lower...upper,
+                    participantIDs: [near.identity, far.identity]
+                ))
+            }
+        }
+
+        let sorted = candidates.sorted {
+            if $0.axis != $1.axis {
+                return $0.axis == .horizontal
+            }
+            if abs($0.coordinate - $1.coordinate) > mergeTolerance {
+                return $0.coordinate < $1.coordinate
+            }
+            return $0.span.lowerBound < $1.span.lowerBound
+        }
+        var merged: [SplitResizeHandleGeometry] = []
+        for candidate in sorted {
+            guard let last = merged.last,
+                  last.axis == candidate.axis,
+                  abs(last.coordinate - candidate.coordinate) <= mergeTolerance,
+                  candidate.span.lowerBound <= last.span.upperBound + tolerance else {
+                merged.append(candidate)
+                continue
+            }
+            let mergedLowerBound = min(
+                last.span.lowerBound,
+                candidate.span.lowerBound
+            )
+            let mergedUpperBound = max(
+                last.span.upperBound,
+                candidate.span.upperBound
+            )
+            merged[merged.count - 1] = SplitResizeHandleGeometry(
+                axis: last.axis,
+                coordinate: (last.coordinate + candidate.coordinate) / 2,
+                span: mergedLowerBound...mergedUpperBound,
+                participantIDs: last.participantIDs.union(candidate.participantIDs)
+            )
+        }
+        return merged
+    }
+
+    static func visibleHandleSpans(
+        span: ClosedRange<CGFloat>,
+        axis: SplitAxis,
+        coordinate: CGFloat,
+        thickness: CGFloat = 16,
+        occludingFrames: [CGRect],
+        minimumLength: CGFloat = 12
+    ) -> [ClosedRange<CGFloat>] {
+        guard span.lowerBound.isFinite,
+              span.upperBound.isFinite,
+              span.upperBound > span.lowerBound else { return [] }
+        let interactionFrame: CGRect
+        switch axis {
+        case .horizontal:
+            interactionFrame = CGRect(
+                x: coordinate - thickness / 2,
+                y: span.lowerBound,
+                width: thickness,
+                height: span.upperBound - span.lowerBound
+            )
+        case .vertical:
+            interactionFrame = CGRect(
+                x: span.lowerBound,
+                y: coordinate - thickness / 2,
+                width: span.upperBound - span.lowerBound,
+                height: thickness
+            )
+        }
+
+        var visible: [ClosedRange<CGFloat>] = [span]
+        for frame in occludingFrames where frame.intersects(interactionFrame) {
+            let occludedLower = max(
+                axis == .horizontal ? frame.minY : frame.minX,
+                span.lowerBound
+            )
+            let occludedUpper = min(
+                axis == .horizontal ? frame.maxY : frame.maxX,
+                span.upperBound
+            )
+            guard occludedUpper > occludedLower else { continue }
+            visible = visible.flatMap { candidate -> [ClosedRange<CGFloat>] in
+                guard occludedUpper > candidate.lowerBound,
+                      occludedLower < candidate.upperBound else {
+                    return [candidate]
+                }
+                var remainder: [ClosedRange<CGFloat>] = []
+                if occludedLower - candidate.lowerBound >= minimumLength {
+                    remainder.append(candidate.lowerBound...occludedLower)
+                }
+                if candidate.upperBound - occludedUpper >= minimumLength {
+                    remainder.append(occludedUpper...candidate.upperBound)
+                }
+                return remainder
+            }
+        }
+        return visible.filter { $0.upperBound - $0.lowerBound >= minimumLength }
+    }
+
+    static func connectedParticipantIDs(
+        startingWith identity: String,
+        handles: [SplitResizeHandleGeometry]
+    ) -> Set<String> {
+        var connected: Set<String> = [identity]
+        var didExpand = true
+        while didExpand {
+            didExpand = false
+            for handle in handles
+                where !handle.participantIDs.isDisjoint(with: connected) {
+                let previousCount = connected.count
+                connected.formUnion(handle.participantIDs)
+                if connected.count != previousCount {
+                    didExpand = true
+                }
+            }
+        }
+        return connected
+    }
+
+    static func allowedBoundaryRange(
+        axis: SplitAxis,
+        participants: [SplitResizeParticipantGeometry],
+        screenFrame: CGRect
+    ) -> ClosedRange<CGFloat>? {
+        guard !participants.isEmpty else { return nil }
+        var lower = axis == .horizontal ? screenFrame.minX : screenFrame.minY
+        var upper = axis == .horizontal ? screenFrame.maxX : screenFrame.maxY
+
+        for participant in participants {
+            let minimum = max(participant.minimumLength, 1)
+            switch (axis, participant.side) {
+            case (.horizontal, .nearOrigin):
+                lower = max(lower, participant.frame.minX + minimum)
+            case (.horizontal, .farOrigin):
+                upper = min(upper, participant.frame.maxX - minimum)
+            case (.vertical, .nearOrigin):
+                lower = max(lower, participant.frame.minY + minimum)
+            case (.vertical, .farOrigin):
+                upper = min(upper, participant.frame.maxY - minimum)
+            }
+        }
+        guard lower <= upper else { return nil }
+        return lower...upper
+    }
+
+    static func resizedFrames(
+        meetingBoundary coordinate: CGFloat,
+        axis: SplitAxis,
+        participants: [SplitResizeParticipantGeometry]
+    ) -> [String: CGRect] {
+        Dictionary(uniqueKeysWithValues: participants.map { participant in
+            (
+                participant.stableIdentity,
+                frame(
+                    participant.frame,
+                    meetingBoundary: coordinate,
+                    side: participant.side,
+                    axis: axis
+                )
+            )
+        })
+    }
 
     static func splitAxes(for zone: SnapZone) -> Set<SplitAxis> {
         switch zone {
