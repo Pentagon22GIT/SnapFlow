@@ -53,6 +53,16 @@ struct ResizeHandleDescriptor: Equatable {
             )
         }
     }
+
+    func isOccluded(by frames: [CGRect]) -> Bool {
+        let handleFrame = interactionFrame()
+        return frames.contains { frame in
+            let intersection = handleFrame.intersection(frame)
+            return !intersection.isNull
+                && intersection.width > 1
+                && intersection.height > 1
+        }
+    }
 }
 
 
@@ -118,7 +128,7 @@ final class ResizeHandleOverlay {
             let panel = panels[descriptor.id] ?? makePanel(for: descriptor)
             panels[descriptor.id] = panel
             panel.update(descriptor: descriptor)
-            panel.ignoresMouseEvents = isInputSuspended
+            panel.setInputSuspended(isInputSuspended)
             if activeHandleID == nil || activeHandleID == descriptor.id {
                 panel.orderFrontRegardless()
             } else {
@@ -179,8 +189,9 @@ final class ResizeHandleOverlay {
     }
 
     func setInputSuspended(_ isSuspended: Bool) {
+        guard isInputSuspended != isSuspended else { return }
         isInputSuspended = isSuspended
-        panels.values.forEach { $0.ignoresMouseEvents = isSuspended }
+        panels.values.forEach { $0.setInputSuspended(isSuspended) }
         junctionPanels.values.forEach { $0.ignoresMouseEvents = isSuspended }
     }
 
@@ -327,6 +338,11 @@ private final class ResizeHandlePanel: NSPanel {
             : .floating
     }
 
+    func setInputSuspended(_ isSuspended: Bool) {
+        ignoresMouseEvents = isSuspended
+        handleView.setInputSuspended(isSuspended)
+    }
+
     func cancelInteraction() {
         handleView.cancelInteraction()
     }
@@ -340,7 +356,7 @@ private final class ResizeHandleView: NSView {
     var descriptor: ResizeHandleDescriptor {
         didSet {
             updatePillFrame()
-            updatePillVisibility()
+            updatePillAppearance(animated: false)
             discardCursorRects()
         }
     }
@@ -354,6 +370,7 @@ private final class ResizeHandleView: NSView {
     private var trackingArea: NSTrackingArea?
     private var isHovering = false
     private var isDragging = false
+    private var isInputSuspended = false
 
     init(descriptor: ResizeHandleDescriptor) {
         self.descriptor = descriptor
@@ -371,7 +388,7 @@ private final class ResizeHandleView: NSView {
         pillLayer.shadowRadius = 3
         pillLayer.shadowOffset = CGSize(width: 0, height: -1)
         layer?.addSublayer(pillLayer)
-        updatePillVisibility()
+        updatePillAppearance(animated: false)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -451,6 +468,12 @@ private final class ResizeHandleView: NSView {
         updatePillAppearance()
     }
 
+    func setInputSuspended(_ isSuspended: Bool) {
+        guard isInputSuspended != isSuspended else { return }
+        isInputSuspended = isSuspended
+        updatePillAppearance(animated: false)
+    }
+
     private func updatePillFrame() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -490,20 +513,29 @@ private final class ResizeHandleView: NSView {
         CATransaction.commit()
     }
 
-    private func updatePillAppearance() {
+    private func updatePillAppearance(animated: Bool = true) {
         CATransaction.begin()
-        CATransaction.setAnimationDuration(0.10)
-        guideLayer.opacity = isHovering || isDragging ? 1 : 0
-        updatePillVisibility()
+        if animated {
+            CATransaction.setAnimationDuration(0.10)
+        } else {
+            CATransaction.setDisableActions(true)
+        }
+        let isInteractive = !isInputSuspended
+        guideLayer.opacity = isInteractive && (isHovering || isDragging) ? 1 : 0
+        if isInputSuspended {
+            pillLayer.opacity = descriptor.showsPill ? 0.18 : 0
+        } else if isDragging {
+            pillLayer.opacity = 1
+        } else if isHovering {
+            pillLayer.opacity = 0.92
+        } else {
+            pillLayer.opacity = descriptor.showsPill ? 0.45 : 0
+        }
         pillLayer.backgroundColor = isDragging
             ? NSColor.controlAccentColor.cgColor
             : NSColor.white.withAlphaComponent(isHovering ? 1 : 0.88).cgColor
         CATransaction.commit()
         updatePillFrame()
-    }
-
-    private func updatePillVisibility() {
-        pillLayer.opacity = descriptor.showsPill || isHovering || isDragging ? 1 : 0
     }
 }
 
