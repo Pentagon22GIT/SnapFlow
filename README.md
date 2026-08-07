@@ -98,6 +98,8 @@ SnapFlowには、解析、広告、テレメトリー、クラッシュ自動送
 
 初期ONの「スナップ中のウィンドウ選択による最前面移動」を有効にすると、通常クリック、Mission Control、アプリ切替、Space切替などで選択したウィンドウが現在の接続グループに所属している場合、そのグループだけを前面へまとめます。通常クリックはmacOS側のZ順確定後に、その他の選択はfrontmostアプリ内のWindow Server IDが安定した後に判定します。追従側を先に、利用者が選択したウィンドウを最後に上げるため、選択対象をグループ内の最前面に保ちます。各経路の保留要求と再試行には上限があり、すでにグループ全体が前面にある場合はAXRaiseを行いません。OFFの場合は接続相手を動かさず、一時的な重なりやZ順変化だけで共有接続を解除することもありません。
 
+v1.2.3以降、通知欠落を補う100msのWindow Server確認は、SnapFlow、連動リサイズ、グループ前面化が有効で、スナップ登録が2件以上ある期間だけ起動します。設定OFFや対象不足ではTimer自体を停止し、再び条件を満たした時点で最初の値を新しいbaselineとして監視を再開します。接続中の10Hz確認と選択確定時の安全検証は変更していません。
+
 既存の配置が画面の50%ではない場合、新しいスナップと配置アシストは残り領域を使用します。アプリ固有の最小サイズで収まらない通常のスナップは、実際に受け入れられたサイズを使用し、必要に応じて重なりを許容します。
 
 残り領域が、そのウィンドウで観測した制約サイズに対して設定された許容度を超えて不足する場合は、その配置が到達した縦線または横線の段を一段階再分割します。再分割先のいずれかが同じ許容度を満たせない場合は、新しいウィンドウと既存レイアウトを一括でスナップ前へ戻します。固定ptやディスプレイ全体に対する割合は、この判定には使用しません。
@@ -155,7 +157,7 @@ Accessibilityは強い権限です。GitHub Releases以外から入手したア�
 Releaseファイルを置いたフォルダで実行します。
 
 ```zsh
-shasum -a 256 -c SnapFlow-1.2.2.sha256
+shasum -a 256 -c SnapFlow-1.2.3.sha256
 ```
 
 SHA-256は、ダウンロードしたZIPがRelease作成時のファイルと一致するかを確認するためのものです。ZIPと`.sha256`を同じReleaseから取得するため、SHA-256だけでは配布元の本人性を独立に証明できません。公式GitHubリポジトリ、署名済みReleaseタグ、アプリのコード署名を組み合わせて確認してください。
@@ -171,7 +173,7 @@ codesign --verify --strict --verbose=4 \
   SnapFlow.app
 ```
 
-v1.2.2では、表示されたBundle IDが`dev.pent.SnapFlow`であること、証明書SHA-1が`26479A3C344B9500A9CEFDBD00FB1A086C3D1295`であること、Designated Requirementと`release-manifest.json`が同じ値を示すことを確認します。SHA-1はこの証明書をDesignated Requirement内で識別するために使用しており、配布ファイルの完全性確認にはSHA-256を使用します。名前だけの一致は公式版の証明になりません。
+v1.2.3では、表示されたBundle IDが`dev.pent.SnapFlow`であること、証明書SHA-1が`26479A3C344B9500A9CEFDBD00FB1A086C3D1295`であること、Designated Requirementと`release-manifest.json`が同じ値を示すことを確認します。SHA-1はこの証明書をDesignated Requirement内で識別するために使用しており、配布ファイルの完全性確認にはSHA-256を使用します。名前だけの一致は公式版の証明になりません。
 
 ## 更新
 
@@ -282,7 +284,10 @@ SnapFlow/
 │   ├── RELEASE_NOTES_v1.2.0.md
 │   ├── RELEASE_NOTES_v1.2.1.md
 │   ├── RELEASE_NOTES_v1.2.2.md
+│   ├── RELEASE_NOTES_v1.2.3.md
 │   ├── RELEASE_WORKFLOW_v1.2.2.md
+│   ├── RELEASE_WORKFLOW_v1.2.3.md
+│   ├── POWER_EFFICIENCY_AUDIT_v1.2.3.md
 │   ├── SECURITY_AUDIT.md
 │   ├── THREAT_MODEL.md
 │   ├── VALIDATION.md
@@ -290,7 +295,8 @@ SnapFlow/
 │   ├── VALIDATION_v1.1.1.md
 │   ├── VALIDATION_v1.2.0.md
 │   ├── VALIDATION_v1.2.1.md
-│   └── VALIDATION_v1.2.2.md
+│   ├── VALIDATION_v1.2.2.md
+│   └── VALIDATION_v1.2.3.md
 ├── Scripts/
 │   ├── build-app.sh
 │   ├── build-community.sh
