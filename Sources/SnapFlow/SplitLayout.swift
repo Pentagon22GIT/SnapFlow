@@ -128,21 +128,27 @@ enum SplitLayoutGeometry {
         orderedWindows: [SplitZOrderWindow]
     ) -> Bool {
         guard groupIDs.count >= 2 else { return true }
-        for groupIndex in orderedWindows.indices {
-            let groupWindow = orderedWindows[groupIndex]
-            guard groupIDs.contains(groupWindow.stableIdentity) else { continue }
-            for externalIndex in orderedWindows.indices where externalIndex < groupIndex {
-                let externalWindow = orderedWindows[externalIndex]
-                if groupIDs.contains(externalWindow.stableIdentity) { continue }
-                let intersection = groupWindow.frame.intersection(externalWindow.frame)
-                if !intersection.isNull,
-                   intersection.width > 1,
-                   intersection.height > 1 {
-                    return false
-                }
-            }
+        let groupWindows = orderedWindows.filter {
+            groupIDs.contains($0.stableIdentity)
         }
-        return true
+        guard groupWindows.count == groupIDs.count else { return false }
+
+        let groupBounds = groupWindows.dropFirst().reduce(
+            groupWindows[0].frame
+        ) { bounds, window in
+            bounds.union(window.frame)
+        }
+        guard let rearmostGroupIndex = orderedWindows.lastIndex(where: {
+            groupIDs.contains($0.stableIdentity)
+        }) else { return false }
+
+        return !orderedWindows[..<rearmostGroupIndex].contains { window in
+            guard !groupIDs.contains(window.stableIdentity) else { return false }
+            let intersection = groupBounds.intersection(window.frame)
+            return !intersection.isNull
+                && intersection.width > 1
+                && intersection.height > 1
+        }
     }
 
     static let contactTolerance: CGFloat = 8
@@ -268,64 +274,6 @@ enum SplitLayoutGeometry {
             )
         }
         return merged
-    }
-
-    static func visibleHandleSpans(
-        span: ClosedRange<CGFloat>,
-        axis: SplitAxis,
-        coordinate: CGFloat,
-        thickness: CGFloat = 16,
-        occludingFrames: [CGRect],
-        minimumLength: CGFloat = 12
-    ) -> [ClosedRange<CGFloat>] {
-        guard span.lowerBound.isFinite,
-              span.upperBound.isFinite,
-              span.upperBound > span.lowerBound else { return [] }
-        let interactionFrame: CGRect
-        switch axis {
-        case .horizontal:
-            interactionFrame = CGRect(
-                x: coordinate - thickness / 2,
-                y: span.lowerBound,
-                width: thickness,
-                height: span.upperBound - span.lowerBound
-            )
-        case .vertical:
-            interactionFrame = CGRect(
-                x: span.lowerBound,
-                y: coordinate - thickness / 2,
-                width: span.upperBound - span.lowerBound,
-                height: thickness
-            )
-        }
-
-        var visible: [ClosedRange<CGFloat>] = [span]
-        for frame in occludingFrames where frame.intersects(interactionFrame) {
-            let occludedLower = max(
-                axis == .horizontal ? frame.minY : frame.minX,
-                span.lowerBound
-            )
-            let occludedUpper = min(
-                axis == .horizontal ? frame.maxY : frame.maxX,
-                span.upperBound
-            )
-            guard occludedUpper > occludedLower else { continue }
-            visible = visible.flatMap { candidate -> [ClosedRange<CGFloat>] in
-                guard occludedUpper > candidate.lowerBound,
-                      occludedLower < candidate.upperBound else {
-                    return [candidate]
-                }
-                var remainder: [ClosedRange<CGFloat>] = []
-                if occludedLower - candidate.lowerBound >= minimumLength {
-                    remainder.append(candidate.lowerBound...occludedLower)
-                }
-                if candidate.upperBound - occludedUpper >= minimumLength {
-                    remainder.append(occludedUpper...candidate.upperBound)
-                }
-                return remainder
-            }
-        }
-        return visible.filter { $0.upperBound - $0.lowerBound >= minimumLength }
     }
 
     static func connectedParticipantIDs(

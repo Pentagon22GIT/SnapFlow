@@ -395,39 +395,6 @@ final class SplitLayoutTests: XCTestCase {
         )
     }
 
-    func testOccluderRemovesOnlyTheCoveredPartOfAHandle() {
-        let spans = SplitLayoutGeometry.visibleHandleSpans(
-            span: 0...900,
-            axis: .horizontal,
-            coordinate: 720,
-            occludingFrames: [CGRect(x: 700, y: 300, width: 100, height: 200)]
-        )
-        XCTAssertEqual(spans, [0...300, 500...900])
-    }
-
-    func testFullyOccludedHandleHasNoInteractiveSpan() {
-        XCTAssertTrue(
-            SplitLayoutGeometry.visibleHandleSpans(
-                span: 0...900,
-                axis: .horizontal,
-                coordinate: 720,
-                occludingFrames: [CGRect(x: 700, y: -20, width: 100, height: 940)]
-            ).isEmpty
-        )
-    }
-
-    func testWindowAwayFromTheInteractionBandDoesNotClipTheHandle() {
-        XCTAssertEqual(
-            SplitLayoutGeometry.visibleHandleSpans(
-                span: 0...900,
-                axis: .horizontal,
-                coordinate: 720,
-                occludingFrames: [CGRect(x: 900, y: 300, width: 100, height: 200)]
-            ),
-            [0...900]
-        )
-    }
-
     func testOnlyWindowsAboveAHandleParticipantCanOccludeIt() {
         let snapshot = [
             WindowOcclusionSnapshot(
@@ -670,6 +637,94 @@ final class SplitLayoutTests: XCTestCase {
         )
     }
 
+    func testUnoccludedHandleRemainsAvailable() {
+        let descriptor = ResizeHandleDescriptor(
+            id: "display:1:vertical-divider",
+            displayID: 1,
+            axis: .horizontal,
+            coordinate: 720,
+            span: 0...900,
+            screenFrame: screen,
+            participantIDs: ["left", "right"]
+        )
+        XCTAssertFalse(descriptor.isOccluded(by: []))
+    }
+
+    func testPartiallyOccludedHandleIsEntirelyUnavailable() {
+        let descriptor = ResizeHandleDescriptor(
+            id: "display:1:vertical-divider",
+            displayID: 1,
+            axis: .horizontal,
+            coordinate: 720,
+            span: 0...900,
+            screenFrame: screen,
+            participantIDs: ["left", "right"]
+        )
+        XCTAssertTrue(descriptor.isOccluded(by: [
+            CGRect(x: 700, y: 400, width: 40, height: 100)
+        ]))
+    }
+
+    func testFullyOccludedHandleIsEntirelyUnavailable() {
+        let descriptor = ResizeHandleDescriptor(
+            id: "display:1:vertical-divider",
+            displayID: 1,
+            axis: .horizontal,
+            coordinate: 720,
+            span: 0...900,
+            screenFrame: screen,
+            participantIDs: ["left", "right"]
+        )
+        XCTAssertTrue(descriptor.isOccluded(by: [
+            CGRect(x: 700, y: -20, width: 40, height: 940)
+        ]))
+    }
+
+    func testPartiallyOccludedHorizontalDividerIsEntirelyUnavailable() {
+        let descriptor = ResizeHandleDescriptor(
+            id: "display:1:horizontal-divider",
+            displayID: 1,
+            axis: .vertical,
+            coordinate: 450,
+            span: 0...1_440,
+            screenFrame: screen,
+            participantIDs: ["top", "bottom"]
+        )
+        XCTAssertTrue(descriptor.isOccluded(by: [
+            CGRect(x: 600, y: 430, width: 240, height: 40)
+        ]))
+    }
+
+    func testWindowTouchingOnlyTheInteractionFrameEdgeDoesNotHideHandle() {
+        let descriptor = ResizeHandleDescriptor(
+            id: "display:1:vertical-divider",
+            displayID: 1,
+            axis: .horizontal,
+            coordinate: 720,
+            span: 0...900,
+            screenFrame: screen,
+            participantIDs: ["left", "right"]
+        )
+        XCTAssertFalse(descriptor.isOccluded(by: [
+            CGRect(x: 728, y: 400, width: 100, height: 100)
+        ]))
+    }
+
+    func testWindowAwayFromHandleDoesNotHideIt() {
+        let descriptor = ResizeHandleDescriptor(
+            id: "display:1:vertical-divider",
+            displayID: 1,
+            axis: .horizontal,
+            coordinate: 720,
+            span: 0...900,
+            screenFrame: screen,
+            participantIDs: ["left", "right"]
+        )
+        XCTAssertFalse(descriptor.isOccluded(by: [
+            CGRect(x: 900, y: 400, width: 40, height: 100)
+        ]))
+    }
+
     func testConnectedParticipantIDsIncludeTheWholeSplitGroupOnly() {
         let handles = [
             SplitResizeHandleGeometry(
@@ -796,7 +851,7 @@ final class SplitLayoutTests: XCTestCase {
         XCTAssertEqual(frames["right"]?.maxX, screen.maxX)
     }
 
-    func testConnectedGroupIsAlreadyFrontmostWhenExternalWindowOnlyOverlapsFrontMember() {
+    func testConnectedGroupNeedsRaiseWhenExternalWindowSeparatesMembers() {
         let windows = [
             SplitZOrderWindow(
                 stableIdentity: "front-group",
@@ -811,9 +866,63 @@ final class SplitLayoutTests: XCTestCase {
                 frame: CGRect(x: 500, y: 0, width: 500, height: 900)
             )
         ]
+        XCTAssertFalse(SplitLayoutGeometry.connectedGroupIsFrontmost(
+            groupIDs: ["front-group", "rear-group"],
+            orderedWindows: windows
+        ))
+    }
+
+    func testConnectedGroupIsFrontmostWhenAllMembersLeadRelevantWindows() {
+        let windows = [
+            SplitZOrderWindow(
+                stableIdentity: "front-group",
+                frame: CGRect(x: 0, y: 0, width: 500, height: 900)
+            ),
+            SplitZOrderWindow(
+                stableIdentity: "rear-group",
+                frame: CGRect(x: 500, y: 0, width: 500, height: 900)
+            ),
+            SplitZOrderWindow(
+                stableIdentity: "external",
+                frame: CGRect(x: 100, y: 100, width: 800, height: 200)
+            )
+        ]
         XCTAssertTrue(SplitLayoutGeometry.connectedGroupIsFrontmost(
             groupIDs: ["front-group", "rear-group"],
             orderedWindows: windows
+        ))
+    }
+
+    func testConnectedGroupIgnoresWindowsOutsideItsCombinedBounds() {
+        let windows = [
+            SplitZOrderWindow(
+                stableIdentity: "external-display",
+                frame: CGRect(x: 2_000, y: 0, width: 500, height: 900)
+            ),
+            SplitZOrderWindow(
+                stableIdentity: "front-group",
+                frame: CGRect(x: 0, y: 0, width: 500, height: 900)
+            ),
+            SplitZOrderWindow(
+                stableIdentity: "rear-group",
+                frame: CGRect(x: 500, y: 0, width: 500, height: 900)
+            )
+        ]
+        XCTAssertTrue(SplitLayoutGeometry.connectedGroupIsFrontmost(
+            groupIDs: ["front-group", "rear-group"],
+            orderedWindows: windows
+        ))
+    }
+
+    func testConnectedGroupIsNotFrontmostWhenAMemberIsMissing() {
+        XCTAssertFalse(SplitLayoutGeometry.connectedGroupIsFrontmost(
+            groupIDs: ["front-group", "missing-group"],
+            orderedWindows: [
+                SplitZOrderWindow(
+                    stableIdentity: "front-group",
+                    frame: CGRect(x: 0, y: 0, width: 500, height: 900)
+                )
+            ]
         ))
     }
 
